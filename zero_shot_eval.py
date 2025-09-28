@@ -6,8 +6,7 @@ from datasets import load_dataset
 from dotenv import load_dotenv
 import torch
 from vllm.model_executor import set_random_seed as vllm_set_random_seed
-
-load_dotenv()
+from starter import reward_fn
 
 SEED = 42
 vllm_set_random_seed(SEED)
@@ -21,30 +20,7 @@ For example, numbers = [1, 2, 3, 4] and target = 5, the answer is <answer>(1 + 2
 
 def is_correct(response: str, target: float, numbers: list) -> bool:
     """Check if response contains correct equation."""
-    matches = list(re.finditer(r"<answer>(.*?)</answer>", response, flags=re.DOTALL))
-    if not matches:
-        return False
-    
-    equation = matches[-1].group(1).strip()
-    
-    # Check numbers used
-    try:
-        nums_in_eq = [int(n) for n in re.findall(r"\d+", equation)]
-        if sorted(nums_in_eq) != sorted(numbers):
-            return False
-    except:
-        return False
-    
-    # Evaluate equation
-    try:
-        if not re.match(r"^[\d+\-*/().\s]+$", equation):
-            return False
-        if re.search(r"\d\s*\(|\)\s*\d|\)\s*\(", equation):
-            return False
-        result = eval(equation, {"__builtins__": None}, {})
-        return abs(float(result) - target) < 1e-5
-    except:
-        return False
+    return reward_fn(response, {"target": target, "numbers": numbers}) == 1.
 
 def main():
     parser = argparse.ArgumentParser(description="Zero-shot evaluation of math reasoning")
