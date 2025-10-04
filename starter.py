@@ -135,7 +135,10 @@ def _extract_answer(solution_str: str) -> str | None:
         The stripped string content of the last answer tag, or None if no tag is found.
     """
     ### YOUR CODE HERE ###
-    pass
+    if not solution_str: 
+        return None
+    m = re.finditer(r"<answer>\s*(.*?)\s*</answer>", solution_str, re.DOTALL | re.IGNORECASE)
+    return m.group(-1) if m else None
     ### END YOUR CODE ###
 
 
