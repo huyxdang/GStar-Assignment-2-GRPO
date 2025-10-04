@@ -164,8 +164,26 @@ def _validate_numbers(equation_str: str, available_numbers: List[int]) -> bool:
         True if the equation uses the correct numbers, False otherwise.
     """
     ### YOUR CODE HERE ###
-    pass
+    try: 
+        # Extract all numbers from the equation 
+        found_numbers = re.find(r"/d+", equation_str)
+        
+        # Convert them into string
+        str_found_numbers = list(map(int, found_numbers))
+        
+        # Compare (check for number & frequency - since each number must only appear once)
+        return sorted(str_found_numbers) == sorted(available_numbers)
+        
+    except Exception:
+        return False 
     ### END YOUR CODE ###
+assert _validate_numbers("(79 - (60 - 17))", [79, 60, 17]) == True
+assert _validate_numbers("(79 - 60)", [79, 60, 17]) == False
+assert _validate_numbers("(79 - 17 - 17)", [79, 60, 17]) == False
+assert _validate_numbers("79 + 60 + 17", [79, 17, 60]) == True
+assert _validate_numbers("", [1, 2, 3]) == False
+
+print("✅ All tests passed!")
 
 
 def _evaluate_equation(equation_str: str) -> float | None:
