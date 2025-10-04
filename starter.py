@@ -145,7 +145,7 @@ def _extract_answer(solution_str: str) -> str | None:
 rollout_response = "Okay, let's see. I need to use 79, 17, ... So the equation is ,→ <answer>(79 - (60 - 17))</answer>"
 extracted_answer = _extract_answer(rollout_response)
 assert extracted_answer == "(79 - (60 - 17))"
-print("✅ Test passed!")
+print("✅ extract_answer: Test passed!")
 
 
 def _validate_numbers(equation_str: str, available_numbers: List[int]) -> bool:
@@ -183,7 +183,7 @@ assert _validate_numbers("(79 - 17 - 17)", [79, 60, 17]) == False
 assert _validate_numbers("79 + 60 + 17", [79, 17, 60]) == True
 assert _validate_numbers("", [1, 2, 3]) == False
 
-print("✅ All tests passed!")
+print("✅ validate_numbers: Tests passed!")
 
 
 def _evaluate_equation(equation_str: str) -> float | None:
@@ -195,8 +195,23 @@ def _evaluate_equation(equation_str: str) -> float | None:
         The result of the equation as a float, or None if it's invalid or unsafe.
     """
     ### YOUR CODE HERE ###
-    pass
+    try: 
+        # Allows only valid characters
+        if not re.fullmatch(r"[0-9+\-*/()\s]+", equation_str): 
+            return None
+        
+        # Evaluate
+        eval(equation_str, {"__builtins__": None}, {})
+
+        # Return to float
+        return float(result)
+        
+    except Exception:
+        return None
     ### END YOUR CODE ###
+
+assert _evaluate_equation("(65 - 7) - 7") == 51.0
+print("✅ evaluate_equation: Tests passed!")
 
 # ==============================================================================
 # TASK 2: Implement the Reward Function
