@@ -166,7 +166,7 @@ def _validate_numbers(equation_str: str, available_numbers: List[int]) -> bool:
     ### YOUR CODE HERE ###
     try: 
         # Extract all numbers from the equation 
-        found_numbers = re.find(r"/d+", equation_str)
+        found_numbers = re.findall(r"\d+", equation_str)
         
         # Convert them into string
         str_found_numbers = list(map(int, found_numbers))
