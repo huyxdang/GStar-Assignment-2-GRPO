@@ -201,7 +201,7 @@ def _evaluate_equation(equation_str: str) -> float | None:
             return None
         
         # Evaluate
-        eval(equation_str, {"__builtins__": None}, {})
+        result = eval(equation_str, {"__builtins__": None}, {})
 
         # Return to float
         return float(result)
