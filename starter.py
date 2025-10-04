@@ -236,8 +236,46 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
         A float value representing the reward, such as 1.0, 0.1, or 0.0
     """
     ### YOUR CODE HERE ###
-    pass
+    target = ground_truth.get("target")
+    available_numbers = ground_truth.get("numbers", [])
+
+    # Extract Equation from <answer>
+    equation = _extract_answer(generated_text)
+    if equation is None:
+        # No <answer> tag found
+        return 0.0
+
+    # Validate Numbers
+    if not _validate_numbers(equation, available_numbers):
+        # Has <answer> tag, but wrong numbers
+        return 0.1
+
+    # Safely Evaluate
+    result = _evaluate_equation(equation)
+    if result is None:
+        # Equation invalid for any reason
+        return 0.1
+
+    # Check for Correctness
+    if abs(result - target) < 1e-6:
+        return 1.0
+    else:
+        return 0.1
     ### END YOUR CODE ###
+    
+# Example 1: Correct Answer
+rollout = "...thinking... <answer>(79 - (60 - 17))</answer>"
+assert reward_fn(rollout, ground_truth) == 1.0
+
+# Example 2: Correct usage, Wrong Answer (Partial, R = 0.1)
+rollout = "...thinking...<answer>(79 + 60) + 17</answer>"
+assert reward_fn(rollout, ground_truth) == 0.1 # valid format of <answer>
+
+# Example 3: No Answer Tag (Failed Format, R = 0.0)
+rollout = "...thinking...The final answer is 62."
+assert reward_fn(rollout, ground_truth) == 0.0
+
+print("✅ reward_fn: Tests passed!")
 
 
 def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List[str], eval_answers: List[Dict]) -> Dict[str, Any]:
