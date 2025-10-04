@@ -140,6 +140,12 @@ def _extract_answer(solution_str: str) -> str | None:
     m = re.finditer(r"<answer>\s*(.*?)\s*</answer>", solution_str, re.DOTALL | re.IGNORECASE)
     return m.group(-1) if m else None
     ### END YOUR CODE ###
+    
+# Input/Output Format:
+rollout_response = "Okay, let's see. I need to use 79, 17, ... So the equation is ,→ <answer>(79 - (60 - 17))</answer>"
+extracted_answer = _extract_answer(rollout_response)
+assert extracted_answer == "(79 - (60 - 17))"
+print("✅ Test passed!")
 
 
 def _validate_numbers(equation_str: str, available_numbers: List[int]) -> bool:
