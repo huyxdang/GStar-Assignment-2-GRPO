@@ -403,7 +403,36 @@ def compute_group_normalized_advantages(
     # 7. Create a `metadata` dictionary with overall statistics of the raw rewards.
     advantages, raw_rewards, metadata = None, None, {}
     ### YOUR CODE HERE ###
-    pass
+    # 1. Calculate raw rewards
+    rewards = [reward_fn(resp, gt) for resp, gt in zip(rollout_responses, repeated_ground_truths)]
+    raw_rewards = torch.tensor(rewards, dtype=torch.float32)
+
+    # 2. Reshape into groups
+    batch_size = len(raw_rewards) // group_size
+    rewards_grouped = raw_rewards.view(-1, group_size) # (-1, group_size)
+
+    # 3. Compute group mean and std
+    group_mean = rewards_grouped.mean(dim=1, keepdim=True)
+    group_std = rewards_grouped.std(dim=1, keepdim=True, unbiased=False)
+
+    # 4. Compute advantage (subtract group mean)
+    advantages = rewards_grouped - group_mean
+
+    # 5. Optionally normalize by std
+    if normalize_by_std:
+        advantages = advantages / (group_std + advantage_eps)
+
+    # 6. Flatten back to 1D
+    advantages = advantages.flatten()
+
+    # 7. Metadata dictionary
+    metadata = {
+        "mean": torch.mean(raw_rewards),
+        "std": torch.std(raw_rewards, unbiased=False),
+        "max": torch.max(raw_rewards),
+        "min": torch.min(raw_rewards),
+    }
+    
     ### END YOUR CODE ###
     return advantages, raw_rewards, metadata
 
@@ -434,7 +463,28 @@ def compute_loss(
     """
     loss = 0.0
     ### YOUR CODE HERE ###
-    pass
+
+    # 1. Ratio between new and old policies
+    pi_ratio = torch.exp(policy_log_probs - old_log_probs)
+
+    # 2. Unclipped term
+    unclipped = advantages.unsqueeze(-1) * pi_ratio
+
+    # 3. Clipped term
+    clipped_ratio = torch.clamp(pi_ratio, 1 - clip_range, 1 + clip_range)
+    clipped = advantages.unsqueeze(-1) * clipped_ratio
+
+    # 4. Take elementwise minimum and negate (PPO-style objective)
+    loss = -torch.minimum(unclipped, clipped)
+
+    # Optional metadata for logging/debugging
+    stats = {
+        "ratio_mean": pi_ratio.mean(),
+        "ratio_std": pi_ratio.std(),
+        "ratio_min": pi_ratio.min(),
+        "ratio_max": pi_ratio.max(),
+    }
+    
     ### END YOUR CODE ###
     return loss
 
@@ -444,7 +494,13 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     Compute the mean of tensor values where mask=True for each row, then average across the batch.
     """
     ### YOUR CODE HERE ###
-    pass
+    # Sum over tokens for each sequence, considering only response tokens
+    masked_sum = (tensor * mask).sum(dim=1)
+    # Count valid tokens per sequence
+    token_count = mask.sum(dim=1).clamp(min=1)
+    # Mean over valid tokens in each sequence, then average across batch
+    mean_per_seq = masked_sum / token_count
+    loss = mean_per_seq.mean()
     ### END YOUR CODE ###
 
 def masked_mean_drgrpo(tensor: torch.Tensor, mask: torch.Tensor, num_tokens: int) -> torch.Tensor:
@@ -453,7 +509,10 @@ def masked_mean_drgrpo(tensor: torch.Tensor, mask: torch.Tensor, num_tokens: int
     This is used for the DR-GRPO loss
     """
     ### YOUR CODE HERE ###
-    pass
+    masked_sum = (tensor * mask).sum(dim=1)
+    # Divide by fixed constant num_tokens (same for all sequences)
+    mean_per_seq = masked_sum / float(num_tokens)
+    loss = mean_per_seq.mean()
     ### END YOUR CODE ###
 
 def get_response_log_probs(model: PreTrainedModel, input_ids: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
