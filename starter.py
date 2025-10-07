@@ -262,7 +262,11 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     else:
         return 0.1
     ### END YOUR CODE ###
-    
+
+# EXAMPLES
+numbers = [79, 17, 60]
+target = 36
+ground_truth = {"numbers": numbers, "target": target}
 # Example 1: Correct Answer
 rollout = "...thinking... <answer>(79 - (60 - 17))</answer>"
 assert reward_fn(rollout, ground_truth) == 1.0
