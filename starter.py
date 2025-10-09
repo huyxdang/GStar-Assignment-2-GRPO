@@ -215,7 +215,7 @@ def _evaluate_equation(equation_str: str) -> float | None:
 # ==============================================================================
 # TASK 2: Implement the Reward Function
 # ==============================================================================
-def reward_fn(generated_text: str, ground_truth: Dict) -> float:
+def reward_fn(generated_text: str, ground_truth: Dict, scale_factor: float = 5.0) -> float:
     """
     Reward function for countdown math problems.
 
