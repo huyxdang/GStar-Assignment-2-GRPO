@@ -739,6 +739,7 @@ def test_functions():
     # Test compute_loss
     print("Testing compute_loss...")
     advantages = torch.randn(4)  # [batch_size=4]
+    advantages = advantages.unsqueeze(-1)  # ✅ ADD THIS LINE - simulate grpo_microbatch_step
     policy_log_probs = torch.randn(4, 10)  # [batch_size=4, seq_len=10]
     old_log_probs = torch.randn(4, 10)
     clip_range = 0.2
