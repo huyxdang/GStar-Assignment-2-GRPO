@@ -40,7 +40,7 @@ def main():
     
     # Load test split from properly split dataset
     eval_raw = load_dataset("justinphan3110/Countdown-Tasks-3to4", split="test")
-    
+
     # Prepare prompts
     prompts = []
     targets = []
