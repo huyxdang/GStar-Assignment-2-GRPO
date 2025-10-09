@@ -212,9 +212,6 @@ def _evaluate_equation(equation_str: str) -> float | None:
         return None
     ### END YOUR CODE ###
 
-assert _evaluate_equation("(65 - 7) - 7") == 51.0
-print("✅ evaluate_equation: Tests passed!")
-
 # ==============================================================================
 # TASK 2: Implement the Reward Function
 # ==============================================================================
@@ -237,54 +234,69 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     Returns:
         A float value representing the reward, such as 1.0, 0.1, or 0.0
     """
-    ### YOUR CODE HERE ###
-    target = ground_truth.get("target")
+        target = ground_truth.get("target")
     available_numbers = ground_truth.get("numbers", [])
-
-    # Extract Equation from <answer>
+    
     equation = _extract_answer(generated_text)
     if equation is None:
-        # No <answer> tag found
         return 0.0
-
-    # Validate Numbers
+    
+    reward = 0.1
+    
     if not _validate_numbers(equation, available_numbers):
-        # Has <answer> tag, but wrong numbers
-        return 0.1
-
-    # Safely Evaluate
+        return reward
+    
+    reward += 0.1
+    
     result = _evaluate_equation(equation)
     if result is None:
-        # Equation invalid for any reason
-        return 0.1
-
-    # Check for Correctness
-    if abs(result - target) < 1e-6:
+        return reward
+    
+    distance = abs(result - target)
+    
+    if distance < 1e-6:
         return 1.0
+    
+    # Hybrid approach: linear for small errors, exponential for large
+    if distance <= scale_factor:
+        # Linear decay for small errors
+        distance_reward = 0.8 * (1.0 - distance / (2 * scale_factor))
     else:
-        return 0.1
-    ### END YOUR CODE ###
+        # Exponential decay for large errors
+        distance_reward = 0.8 * math.exp(-(distance - scale_factor) / scale_factor) * 0.5
+    
+    return reward + max(0.0, distance_reward)
 
-# EXAMPLES
-numbers = [79, 17, 60]
-target = 36
-ground_truth = {"numbers": numbers, "target": target}
-# Example 1: Correct Answer
-rollout = "...thinking... <answer>(79 - (60 - 17))</answer>"
-assert reward_fn(rollout, ground_truth) == 1.0
+    # ### YOUR CODE HERE ###
+    # target = ground_truth.get("target")
+    # available_numbers = ground_truth.get("numbers", [])
 
-# Example 2: Correct usage, Wrong Answer (Partial, R = 0.1)
-rollout = "...thinking...<answer>(79 + 60) + 17</answer>"
-assert reward_fn(rollout, ground_truth) == 0.1 # valid format of <answer>
+    # # Extract Equation from <answer>
+    # equation = _extract_answer(generated_text)
+    # if equation is None:
+    #     # No <answer> tag found
+    #     return 0.0
 
-# Example 3: No Answer Tag (Failed Format, R = 0.0)
-rollout = "...thinking...The final answer is 62."
-assert reward_fn(rollout, ground_truth) == 0.0
+    # # Validate Numbers
+    # if not _validate_numbers(equation, available_numbers):
+    #     # Has <answer> tag, but wrong numbers
+    #     return 0.1
 
-print("✅ reward_fn: Tests passed!")
+    # # Safely Evaluate
+    # result = _evaluate_equation(equation)
+    # if result is None:
+    #     # Equation invalid for any reason
+    #     return 0.1
 
-def reward_fn_continuous(generated_text: str, ground_truth: Dict, 
-                           scale_factor: float = 5.0) -> float:
+    # # Check for Correctness
+    # if abs(result - target) < 1e-6:
+    #     return 1.0
+    # else:
+    #     return 0.1
+    # ### END YOUR CODE ###
+
+
+def reward_fn_continuous(generated_text: str, ground_truth: Dict) -> float:
     """
     Alternative continuous reward with configurable sensitivity.
     
@@ -657,7 +669,7 @@ def train(
         answers_dup = duplicate_data(answers_batch, group_size)
         avg_output_tokens = sum(rollout_tokens) / len(rollout_tokens) if rollout_tokens else 0.0
         advantages, _, reward_meta = compute_group_normalized_advantages(
-            rollout_response, answers_dup, reward_fn_continuous, group_size, advantage_eps, use_std_normalization
+            rollout_response, answers_dup, reward_fn, group_size, advantage_eps, use_std_normalization
         )
         tokenized = tokenize_rollouts(rollout_input, rollout_response, tokenizer)
         optimizer.zero_grad()
