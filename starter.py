@@ -711,6 +711,68 @@ def main() -> None:
     tokenizer.save_pretrained(out_dir)
     print(f"Saved model and tokenizer to {out_dir}")
     writer.close()
+    
+# Test Function
+def test_functions():
+    """Quick unit tests for the implemented functions"""
+    print("\n=== Running Quick Tests ===")
+    
+    # Test masked_mean
+    print("Testing masked_mean...")
+    tensor = torch.randn(4, 10)  # [batch_size=4, seq_len=10]
+    mask = torch.tensor([
+        [False, False, True, True, True, True, False, False, False, False],
+        [False, True, True, True, True, False, False, False, False, False],
+        [False, False, False, True, True, True, True, True, False, False],
+        [False, False, True, True, True, True, True, False, False, False],
+    ])
+    result = masked_mean(tensor, mask)
+    assert result.shape == torch.Size([]), f"Expected scalar, got shape {result.shape}"
+    print(f"✅ masked_mean works! Result: {result.item():.4f}")
+    
+    # Test masked_mean_drgrpo
+    print("Testing masked_mean_drgrpo...")
+    result = masked_mean_drgrpo(tensor, mask, num_tokens=256)
+    assert result.shape == torch.Size([]), f"Expected scalar, got shape {result.shape}"
+    print(f"✅ masked_mean_drgrpo works! Result: {result.item():.4f}")
+    
+    # Test compute_loss
+    print("Testing compute_loss...")
+    advantages = torch.randn(4)  # [batch_size=4]
+    policy_log_probs = torch.randn(4, 10)  # [batch_size=4, seq_len=10]
+    old_log_probs = torch.randn(4, 10)
+    clip_range = 0.2
+    
+    loss_per_token, stats = compute_loss(advantages, policy_log_probs, old_log_probs, clip_range)
+    assert loss_per_token.shape == (4, 10), f"Expected shape (4, 10), got {loss_per_token.shape}"
+    assert "ratio_mean" in stats, "Missing ratio_mean in stats"
+    print(f"✅ compute_loss works! Loss shape: {loss_per_token.shape}")
+    
+    # Test compute_group_normalized_advantages
+    print("Testing compute_group_normalized_advantages...")
+    rollout_responses = ["resp1", "resp2", "resp3", "resp4"]
+    ground_truths = [
+        {"target": 36, "numbers": [79, 17, 60]},
+        {"target": 36, "numbers": [79, 17, 60]},
+        {"target": 36, "numbers": [79, 17, 60]},
+        {"target": 36, "numbers": [79, 17, 60]},
+    ]
+    
+    advantages, raw_rewards, metadata = compute_group_normalized_advantages(
+        rollout_responses, ground_truths, reward_fn, group_size=2, 
+        advantage_eps=1e-6, normalize_by_std=True
+    )
+    assert advantages.shape == (4,), f"Expected shape (4,), got {advantages.shape}"
+    assert raw_rewards.shape == (4,), f"Expected shape (4,), got {raw_rewards.shape}"
+    assert "mean" in metadata and "std" in metadata, "Missing metadata keys"
+    print(f"✅ compute_group_normalized_advantages works!")
+    
+    print("\n=== All Tests Passed! ===\n")
+
 
 if __name__ == "__main__":
+    # Run quick tests first
+    test_functions()
+    
+    # Then run main training
     main()
