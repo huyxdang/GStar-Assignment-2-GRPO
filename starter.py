@@ -500,10 +500,15 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     Compute the mean of tensor values where mask=True for each row, then average across the batch.
     """
     ### YOUR CODE HERE ###
+    # Convert mask to float for proper multiplication
+    mask = mask.float()
+    
     # Sum over tokens for each sequence, considering only response tokens
     masked_sum = (tensor * mask).sum(dim=1)
+    
     # Count valid tokens per sequence
     token_count = mask.sum(dim=1).clamp(min=1)
+    
     # Mean over valid tokens in each sequence, then average across batch
     mean_per_seq = masked_sum / token_count
     loss = mean_per_seq.mean()
@@ -516,7 +521,11 @@ def masked_mean_drgrpo(tensor: torch.Tensor, mask: torch.Tensor, num_tokens: int
     This is used for the DR-GRPO loss
     """
     ### YOUR CODE HERE ###
+    # Convert mask to float for proper multiplication
+    mask = mask.float()
+    
     masked_sum = (tensor * mask).sum(dim=1)
+    
     # Divide by fixed constant num_tokens (same for all sequences)
     mean_per_seq = masked_sum / float(num_tokens)
     loss = mean_per_seq.mean()
