@@ -26,8 +26,6 @@ def main():
     parser = argparse.ArgumentParser(description="Zero-shot evaluation of math reasoning")
     parser.add_argument("-m", "--model", default="Qwen/Qwen3-1.7B", help="Model ID to evaluate")
     parser.add_argument("--max_tokens", type=int, default=256, help="Maximum tokens for generation (default: 256)")
-    # Control number of test samples 
-    parser.add_argument("--num_samples", type=int, default=50, help="Number of examples to evaluate (default: 50)")  
     args = parser.parse_args()
     
     MODEL_ID = args.model
@@ -50,10 +48,6 @@ def main():
     
     for ex in eval_raw:
         prompt_content = TEMPLATE.format(numbers=ex["nums"], target=ex["target"], max_tokens=MAX_TOKENS)
-        #
-        if args.num_samples:
-            eval_raw = eval_raw.shuffle(seed=42).select(range(args.num_samples))
-        #
         prompt = tokenizer.apply_chat_template(
             [{"role": "system", "content": "You are a helpful assistant."},
              {"role": "user", "content": prompt_content}],
