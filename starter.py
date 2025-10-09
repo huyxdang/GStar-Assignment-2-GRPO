@@ -234,7 +234,7 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     Returns:
         A float value representing the reward, such as 1.0, 0.1, or 0.0
     """
-        target = ground_truth.get("target")
+    target = ground_truth.get("target")
     available_numbers = ground_truth.get("numbers", [])
     
     equation = _extract_answer(generated_text)
