@@ -474,11 +474,11 @@ def compute_loss(
     pi_ratio = torch.exp(policy_log_probs - old_log_probs)
 
     # 2. Unclipped term
-    unclipped = advantages.unsqueeze(-1) * pi_ratio
+    unclipped = advantages * pi_ratio
 
     # 3. Clipped term
     clipped_ratio = torch.clamp(pi_ratio, 1 - clip_range, 1 + clip_range)
-    clipped = advantages.unsqueeze(-1) * clipped_ratio
+    clipped = advantages * clipped_ratio
 
     # 4. Take elementwise minimum and negate (PPO-style objective)
     loss = -torch.minimum(unclipped, clipped)
