@@ -1,6 +1,6 @@
 # starter.py
 
-# In this assignment, you will implement the core components of the
+# In this assignment, you'll implement the core components of the
 # Group-Reward Policy Optimization (GRPO) algorithm. You'll be working with a
 # math-solving task called "Countdown," where the model has to generate an
 # equation to reach a target number using a given set of numbers.
