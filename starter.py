@@ -283,6 +283,56 @@ assert reward_fn(rollout, ground_truth) == 0.0
 
 print("✅ reward_fn: Tests passed!")
 
+def reward_fn_continuous(generated_text: str, ground_truth: Dict, 
+                           scale_factor: float = 5.0) -> float:
+    """
+    Alternative continuous reward with configurable sensitivity.
+    
+    This version uses a different scaling approach:
+    - Linear decay for small errors
+    - Exponential decay for large errors
+    
+    Args:
+        generated_text: The full text output from the language model.
+        ground_truth: A dictionary containing `target` and `numbers`.
+        scale_factor: Controls sensitivity to distance (lower = more sensitive)
+    
+    Returns:
+        A float value between 0.0 and 1.0 representing the reward.
+    """
+    target = ground_truth.get("target")
+    available_numbers = ground_truth.get("numbers", [])
+    
+    equation = _extract_answer(generated_text)
+    if equation is None:
+        return 0.0
+    
+    reward = 0.1
+    
+    if not _validate_numbers(equation, available_numbers):
+        return reward
+    
+    reward += 0.1
+    
+    result = _evaluate_equation(equation)
+    if result is None:
+        return reward
+    
+    distance = abs(result - target)
+    
+    if distance < 1e-6:
+        return 1.0
+    
+    # Hybrid approach: linear for small errors, exponential for large
+    if distance <= scale_factor:
+        # Linear decay for small errors
+        distance_reward = 0.8 * (1.0 - distance / (2 * scale_factor))
+    else:
+        # Exponential decay for large errors
+        distance_reward = 0.8 * math.exp(-(distance - scale_factor) / scale_factor) * 0.5
+    
+    return reward + max(0.0, distance_reward)
+
 
 def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List[str], eval_answers: List[Dict]) -> Dict[str, Any]:
     rollouts = llm.generate(eval_prompts, sampling_params)
@@ -607,7 +657,7 @@ def train(
         answers_dup = duplicate_data(answers_batch, group_size)
         avg_output_tokens = sum(rollout_tokens) / len(rollout_tokens) if rollout_tokens else 0.0
         advantages, _, reward_meta = compute_group_normalized_advantages(
-            rollout_response, answers_dup, reward_fn, group_size, advantage_eps, use_std_normalization
+            rollout_response, answers_dup, reward_fn_continuous, group_size, advantage_eps, use_std_normalization
         )
         tokenized = tokenize_rollouts(rollout_input, rollout_response, tokenizer)
         optimizer.zero_grad()
@@ -647,7 +697,7 @@ def main() -> None:
     model_id = "Qwen/Qwen3-1.7B"
     device = "cuda"
     seed, gpu_mem_util = 42, 0.4
-    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 80, 128, 8, 32
+    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 150, 128, 8, 32
     lr, clip_range, adv_eps = 7e-6, 0.2, 1e-6
     temperature, min_tokens = 1.0, 4
     eval_every = 10
