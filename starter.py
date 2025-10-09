@@ -657,7 +657,7 @@ def main() -> None:
     max_tokens = 256 # or 512, 1024
     
     # Initialization
-    use_std_norm = loss_type == "dr_grpo"
+    use_std_norm = loss_type == "grpo"
     policy, tokenizer = init_policy(model_id=model_id, device=device)
     llm = init_vllm(model_id=model_id, device=device, seed=seed, gpu_memory_utilization=gpu_mem_util)
     sampling_params = init_sampling_params(temperature=temperature, min_tokens=min_tokens, max_tokens=max_tokens)
