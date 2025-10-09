@@ -492,7 +492,7 @@ def compute_loss(
     }
     
     ### END YOUR CODE ###
-    return loss
+    return loss, stats
 
 
 def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -508,6 +508,7 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     mean_per_seq = masked_sum / token_count
     loss = mean_per_seq.mean()
     ### END YOUR CODE ###
+    return loss
 
 def masked_mean_drgrpo(tensor: torch.Tensor, mask: torch.Tensor, num_tokens: int) -> torch.Tensor:
     """
@@ -520,6 +521,7 @@ def masked_mean_drgrpo(tensor: torch.Tensor, mask: torch.Tensor, num_tokens: int
     mean_per_seq = masked_sum / float(num_tokens)
     loss = mean_per_seq.mean()
     ### END YOUR CODE ###
+    return loss
 
 def get_response_log_probs(model: PreTrainedModel, input_ids: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     logits = model(input_ids).logits
