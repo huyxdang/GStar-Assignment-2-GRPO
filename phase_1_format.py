@@ -246,11 +246,10 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
 
     Reward breakdown:
     - 0.0: No <answer> tag
-    - 0.3: Has <answer> tag
-    - +0.095: Has both <think> AND <answer> tags (complete format)
-    - +0.3: Uses exactly the correct numbers
-    - +0.3: token usage >= 200 
-    - +0.005: correct answer
+    - +0.275: Has <answer> tag
+    - +0.275: Uses exactly the correct numbers
+    - +0.4: token usage >= 200 
+    - +0.05: correct answer
     Max = 1.0
     """
     target = ground_truth.get("target")
@@ -262,15 +261,11 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     if equation is None:
         return 0.0  # No answer tag → immediate fail
 
-    reward += 0.3  # Base reward for having <answer>
-
-    # 2Check for BOTH <think> and <answer> tags
-    if "<think>" in generated_text and "</think>" in generated_text:
-        reward += 0.095  # Proper full format
+    reward += 0.275  # Base reward for having <answer>
 
     # Check number usage
     if _validate_numbers(equation, available_numbers):
-        reward += 0.3  # Perfect number usage
+        reward += 0.275  # Perfect number usage
     else:
         # Partial credit proportional to how many numbers match
         try:
@@ -278,19 +273,20 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
             correct_count = sum(1 for n in found_numbers if n in available_numbers)
             total_needed = len(available_numbers)
             if total_needed > 0:
-                reward += 0.3 * (correct_count / total_needed)
+                reward += 0.75 * (correct_count / total_needed)
         except Exception:
             pass
 
-    # Check token usage (length-based formatting incentive)
+    # Check token usage (continuous length-based formatting incentive)
     token_count = len(generated_text.split())
-    if token_count >= 200:
-        reward += 0.3
+    max_tokens = 200
+    reward += 0.4 * min(token_count / max_tokens, 1.0)
+
 
     # Tiny bonus for correct equation
     result = _evaluate_equation(equation)
     if result is not None and abs(result - target) < 1e-6:
-        reward += 0.005
+        reward += 0.05
 
     # Clip to 1.0 max (floating-point-error)
     return min(reward, 1.0)
@@ -419,8 +415,8 @@ def log_eval(metrics: Dict[str, Any], writer: SummaryWriter | None, step: int) -
         f"mean_reward={metrics['mean_reward']:.4f} "
         f"avg_tokens={metrics['avg_output_tokens']:.1f} | "
         f"correct:{metrics['count_correct']} partial:{metrics['count_partial']} failed:{metrics['count_failed']} | "
-        f"Formatting Accuracy: {metrics['format_accuracy']:.2f}% | "
-        f"Number Accuracy: {metrics['number_accuracy']:.2f}%"
+        f"format ac: {metrics['format_accuracy']:.2f}% | "
+        f"number ac: {metrics['number_accuracy']:.2f}%"
     )
 
 
