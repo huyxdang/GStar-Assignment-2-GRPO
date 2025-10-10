@@ -43,14 +43,8 @@ class CountdownSFTDataset(Dataset):
 
     def __getitem__(self, idx):
         example = self.examples[idx]
+        prompt = TEMPLATE.format(numbers=example["nums"], target=example["target"])
 
-        # ✅ Build input prompt using target + nums
-        prompt = TEMPLATE.format(
-            numbers=example["nums"],
-            target=example["target"]
-        )
-
-        # Create chat-style format for Qwen tokenizer
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": prompt},
@@ -61,29 +55,28 @@ class CountdownSFTDataset(Dataset):
             tokenize=False
         )
 
-        # ✅ Combine input + desired output
         completion = example["completion"].strip()
         full_text = prompt_formatted + completion
 
         # Tokenize combined text
         tokenized = self.tokenizer(
             full_text,
-            max_length=self.max_length,
             truncation=True,
+            max_length=self.max_length,
             padding=False,
-            return_tensors=None
+            return_tensors=None,
         )
 
-        # ✅ Mask out the prompt portion (so model only learns to predict completion)
-        prompt_length = len(self.tokenizer(prompt_formatted, add_special_tokens=False)["input_ids"])
-        labels = tokenized["input_ids"].copy()
-        labels[:prompt_length] = [-100] * prompt_length  # mask prompt
+        prompt_len = len(self.tokenizer(prompt_formatted, add_special_tokens=False)["input_ids"])
+        labels = tokenized["input_ids"][:]  # make a shallow copy of list
+        labels[:prompt_len] = [-100] * prompt_len  # mask out the prompt
 
         return {
             "input_ids": tokenized["input_ids"],
             "attention_mask": tokenized["attention_mask"],
-            "labels": labels
+            "labels": labels,
         }
+
 
 def train_sft(
     model_id: str = "Qwen/Qwen3-1.7B",
@@ -116,11 +109,10 @@ def train_sft(
     print(f"  Train examples: {len(train_dataset)}")
     print(f"  Val examples: {len(val_dataset)}")
 
-    # ✅ Data collator handles padding dynamically
+    # Data collator handles padding dynamically
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=False,
-        pad_to_multiple_of=8
     )
 
     timestamp = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
