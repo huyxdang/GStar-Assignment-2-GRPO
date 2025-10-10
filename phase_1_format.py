@@ -238,73 +238,63 @@ def _evaluate_equation(equation_str: str) -> float | None:
 # ==============================================================================
 # TASK 2: Implement the Reward Function
 # ==============================================================================
+import re
+
 def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     """
-    Reward function for countdown math problems.
+    Reward function for Countdown Phase 1 (format-focused).
 
-    Your goal is to score the `generated_text` using the helper functions you just wrote.
-    The function should return a dictionary with a "reward" key.
-
-    Scoring criteria:
-    - 1.0 (Perfect): The equation is valid, uses the correct numbers, and evaluates to the target.
-    - 0.1 (Partial): The text contains an <answer> tag, but the equation is incorrect for any reason.
-    - 0.0 (Failed): The `generated_text` does not contain an <answer> tag.
-
-    Args:
-        generated_text: The full text output from the language model.
-        ground_truth: A dictionary containing `target` and `numbers`.
-
-    Returns:
-        A float value representing the reward, such as 1.0, 0.1, or 0.0
-    """
-    """
-    Phase 1: Focus on perfect formatting and correct number usage.
-    
-    Goal: Train model to ALWAYS output both tags and use correct numbers.
-    
     Reward breakdown:
     - 0.0: No <answer> tag
-    - 0.4: Has <answer> tag
-    - +0.1: Has both <think> AND <answer> tags (complete format)
-    - +0.5: Uses exactly the correct numbers
-    
-    Maximum: 1.0 (perfect format + correct numbers)
-    Note: We DON'T care about correctness in Phase 1!
+    - 0.3: Has <answer> tag
+    - +0.095: Has both <think> AND <answer> tags (complete format)
+    - +0.3: Uses exactly the correct numbers
+    - +0.3: token usage >= 200 
+    - +0.005: correct answer
+    Max = 1.0
     """
+    target = ground_truth.get("target")
     available_numbers = ground_truth.get("numbers", [])
-    
-    # Step 1: Check for <answer> tag
+    reward = 0.0
+
+    # Must have <answer> tag
     equation = _extract_answer(generated_text)
     if equation is None:
-        return 0.0
-    
-    reward = 0.5  # Has <answer> tag
-    
-    # Step 2: Check for BOTH tags (complete format)
-    has_think = "<think>" in generated_text and "</think>" in generated_text
-    has_answer = True  # We know this is true from step 1
-    
-    if has_think and has_answer:
-        reward += 0.1  # Complete format
-    
-    # Step 3: Check number usage (most important for Phase 1)
+        return 0.0  # No answer tag → immediate fail
+
+    reward += 0.3  # Base reward for having <answer>
+
+    # 2Check for BOTH <think> and <answer> tags
+    if "<think>" in generated_text and "</think>" in generated_text:
+        reward += 0.095  # Proper full format
+
+    # Check number usage
     if _validate_numbers(equation, available_numbers):
-        reward += 0.4  # Perfect number usage
+        reward += 0.3  # Perfect number usage
     else:
-        # Give partial credit based on how many numbers are correct
+        # Partial credit proportional to how many numbers match
         try:
             found_numbers = [int(n) for n in re.findall(r"\d+", equation)]
             correct_count = sum(1 for n in found_numbers if n in available_numbers)
             total_needed = len(available_numbers)
-            
             if total_needed > 0:
-                # Partial credit: up to 0.5 based on percentage of correct numbers
-                partial_credit = 0.4 * (correct_count / total_needed)
-                reward += partial_credit
-        except:
+                reward += 0.3 * (correct_count / total_needed)
+        except Exception:
             pass
-    
-    return reward
+
+    # Check token usage (length-based formatting incentive)
+    token_count = len(generated_text.split())
+    if token_count >= 200:
+        reward += 0.3
+
+    # Tiny bonus for correct equation
+    result = _evaluate_equation(equation)
+    if result is not None and abs(result - target) < 1e-6:
+        reward += 0.005
+
+    # Clip to 1.0 max (floating-point-error)
+    return min(reward, 1.0)
+
 
 
 def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List[str], eval_answers: List[Dict]) -> Dict[str, Any]:
