@@ -235,66 +235,66 @@ def reward_fn(generated_text: str, ground_truth: Dict, scale_factor: float = 5.0
     Returns:
         A float value representing the reward, such as 1.0, 0.1, or 0.0
     """
-    # target = ground_truth.get("target")
-    # available_numbers = ground_truth.get("numbers", [])
-    
-    # equation = _extract_answer(generated_text)
-    # if equation is None:
-    #     return 0.0
-    
-    # reward = 0.1
-    
-    # if not _validate_numbers(equation, available_numbers):
-    #     return reward
-    
-    # reward += 0.1
-    
-    # result = _evaluate_equation(equation)
-    # if result is None:
-    #     return reward
-    
-    # distance = abs(result - target)
-    
-    # if distance < 1e-6:
-    #     return 1.0
-    
-    # # Hybrid approach: linear for small errors, exponential for large
-    # if distance <= scale_factor:
-    #     # Linear decay for small errors
-    #     distance_reward = 0.8 * (1.0 - distance / (2 * scale_factor))
-    # else:
-    #     # Exponential decay for large errors
-    #     distance_reward = 0.8 * math.exp(-(distance - scale_factor) / scale_factor) * 0.5
-    
-    # return reward + max(0.0, distance_reward)
-
-    ### YOUR CODE HERE ###
     target = ground_truth.get("target")
     available_numbers = ground_truth.get("numbers", [])
-
-    # Extract Equation from <answer>
+    
     equation = _extract_answer(generated_text)
     if equation is None:
-        # No <answer> tag found
         return 0.0
-
-    # Validate Numbers
+    
+    reward = 0.1
+    
     if not _validate_numbers(equation, available_numbers):
-        # Has <answer> tag, but wrong numbers
-        return 0.1
-
-    # Safely Evaluate
+        return reward
+    
+    reward += 0.1
+    
     result = _evaluate_equation(equation)
     if result is None:
-        # Equation invalid for any reason
-        return 0.1
-
-    # Check for Correctness
-    if abs(result - target) < 1e-6:
+        return reward
+    
+    distance = abs(result - target)
+    
+    if distance < 1e-6:
         return 1.0
+    
+    # Hybrid approach: linear for small errors, exponential for large
+    if distance <= scale_factor:
+        # Linear decay for small errors
+        distance_reward = 0.8 * (1.0 - distance / (2 * scale_factor))
     else:
-        return 0.1
-    ### END YOUR CODE ###
+        # Exponential decay for large errors
+        distance_reward = 0.8 * math.exp(-(distance - scale_factor) / scale_factor) * 0.5
+    
+    return reward + max(0.0, distance_reward)
+
+    # ### YOUR CODE HERE ###
+    # target = ground_truth.get("target")
+    # available_numbers = ground_truth.get("numbers", [])
+
+    # # Extract Equation from <answer>
+    # equation = _extract_answer(generated_text)
+    # if equation is None:
+    #     # No <answer> tag found
+    #     return 0.0
+
+    # # Validate Numbers
+    # if not _validate_numbers(equation, available_numbers):
+    #     # Has <answer> tag, but wrong numbers
+    #     return 0.1
+
+    # # Safely Evaluate
+    # result = _evaluate_equation(equation)
+    # if result is None:
+    #     # Equation invalid for any reason
+    #     return 0.1
+
+    # # Check for Correctness
+    # if abs(result - target) < 1e-6:
+    #     return 1.0
+    # else:
+    #     return 0.1
+    # ### END YOUR CODE ###
 
 
 def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List[str], eval_answers: List[Dict]) -> Dict[str, Any]:

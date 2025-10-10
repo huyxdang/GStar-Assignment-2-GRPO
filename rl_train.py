@@ -51,7 +51,7 @@ def get_constant_schedule_with_warmup(optimizer: torch.optim.Optimizer, num_warm
 # Prompting helpers (Countdown-style)
 # -------------------------
 TEMPLATE = """Using the numbers {numbers}, create an equation that equals {target}. 
-You can use basic arithmetic operations (+, -, *, /) and each number can only be used once.
+You can use basic arithmetic operations (+, -, *, /) and each number can only be used ONCE.
 Show your reasoning in <think> </think> tags. And return the final equation in <answer> </answer> tags. Keep your reasoning under {max_tokens} tokens.
 For example, using the numbers [1, 2, 3, 4], create an equation that equals 5. The answer is <answer>(1 + 2) * 3 - 4</answer>."""
 
@@ -308,8 +308,8 @@ def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List
     rewards_tensor = torch.tensor(rewards) if rewards else torch.tensor([0.0])
     tol = 1e-8
     count_correct = sum(1 for r in rewards if abs(r - 1.0) < tol)
-    count_partial = sum(1 for r in rewards if abs(r - 0.1) < tol)
-    count_failed = sum(1 for r in rewards if abs(r - 0.0) < tol)
+    count_failed  = sum(1 for r in rewards if abs(r - 0.0) < tol)
+    count_partial = len(rewards) - count_correct - count_failed
     accuracy = (count_correct / len(rewards)) * 100 if rewards else 0.0
     avg_output_tokens = sum(output_token_lengths) / len(output_token_lengths) if output_token_lengths else 0.0
     return {
@@ -595,6 +595,10 @@ def train(
     advantage_eps: float, device: str, eval_every: int = 5, writer: SummaryWriter = None, seed: int,
     loss_type: str = "grpo", max_completion_length: int = 256,
 ) -> None:
+    best_accuracy = 0.0
+    best_model_path = "./output/best_model"
+    os.makedirs(best_model_path, exist_ok=True)
+    
     n_prompts_per_rollout_batch = rollout_batch_size // group_size
     micro_train_batch_size = rollout_batch_size // gradient_accumulation_steps
     random.seed(seed)
@@ -637,6 +641,18 @@ def train(
         if train_step % eval_every == 0:
             metrics = evaluate_model(llm, sampling_params, eval_prompts, eval_answers)
             log_eval(metrics, writer, train_step)
+            
+            # 🏅 Save best model if accuracy improves
+            current_acc = metrics["accuracy"]
+            if current_acc > best_accuracy:
+                best_accuracy = current_acc
+                print(f"🔥 New best accuracy: {best_accuracy:.2f}% at step {train_step}. Saving model...")
+
+                model_save_dir = os.path.join(best_model_path, f"step_{train_step}")
+                os.makedirs(model_save_dir, exist_ok=True)
+
+                policy.save_pretrained(model_save_dir)
+                tokenizer.save_pretrained(model_save_dir)
 
 
 def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokenizer]:
