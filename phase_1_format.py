@@ -403,9 +403,14 @@ def log_eval(metrics: Dict[str, Any], writer: SummaryWriter | None, step: int) -
         if correct_text: writer.add_text("eval/examples_correct", correct_text, global_step=step)
         if partial_text: writer.add_text("eval/examples_partial", partial_text, global_step=step)
         if failed_text: writer.add_text("eval/examples_failed", failed_text, global_step=step)
-    print(f"Eval @ step {step}: accuracy={metrics['accuracy']:.1f}% mean_reward={metrics['mean_reward']:.4f} "
-          f"avg_tokens={metrics['avg_output_tokens']:.1f} | correct:{metrics['count_correct']} "
-          f"partial:{metrics['count_partial']} failed:{metrics['count_failed']}")
+    print(
+        f"Eval @ step {step}: accuracy={metrics['accuracy']:.1f}% "
+        f"mean_reward={metrics['mean_reward']:.4f} "
+        f"avg_tokens={metrics['avg_output_tokens']:.1f} | "
+        f"correct:{metrics['count_correct']} partial:{metrics['count_partial']} failed:{metrics['count_failed']} | "
+        f"Formatting Accuracy: {metrics['format_accuracy']:.2f}% | "
+        f"Number Accuracy: {metrics['number_accuracy']:.2f}%"
+    )
 
 
 # -------------------------
