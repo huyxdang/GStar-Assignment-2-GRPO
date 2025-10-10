@@ -163,3 +163,15 @@ def train_sft(
     tokenizer.save_pretrained(final_output_dir)
 
     return final_output_dir
+
+if __name__ == "__main__":
+    train_sft(
+        model_id="Qwen/Qwen3-1.7B",
+        train_file="data/sft_train_gpt4.jsonl",
+        val_file="data/sft_val_gpt4.jsonl",
+        output_dir="./sft_checkpoint",
+        num_epochs=3,
+        batch_size=4,
+        learning_rate=2e-5,
+        max_length=512,
+    )
