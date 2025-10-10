@@ -676,6 +676,10 @@ def train(
         if train_step % eval_every == 0:
             metrics = evaluate_model(llm, sampling_params, eval_prompts, eval_answers)
             log_eval(metrics, writer, train_step)
+            
+            # Log your new format metrics
+            writer.add_scalar("eval/format_accuracy", metrics["format_accuracy"], global_step=train_step)
+            writer.add_scalar("eval/number_accuracy", metrics["number_accuracy"], global_step=train_step)
 
 
 def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokenizer]:
