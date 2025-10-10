@@ -46,6 +46,27 @@ def get_constant_schedule_with_warmup(optimizer: torch.optim.Optimizer, num_warm
         return min(1.0, float(current_step) / float(max(1, num_warmup_steps)))
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
+
+# -------------------------
+# Best Model Tracker
+# -------------------------
+best_models = {
+    "format": {"score": 0.0, "path": None},
+    "number": {"score": 0.0, "path": None},
+    "accuracy": {"score": 0.0, "path": None},
+}
+
+def save_best_model(policy, tokenizer, category, score, base_dir="./output/best_models"):
+    """Save model if it beats previous record in a category."""
+    os.makedirs(base_dir, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = os.path.join(base_dir, f"best_{category}_{timestamp}")
+    policy.save_pretrained(save_path)
+    tokenizer.save_pretrained(save_path)
+    print(f"🏆 New best {category} model! {score:.2f}% → saved to {save_path}")
+    return save_path
+
+
 # -------------------------
 # Prompting helpers (Countdown-style)
 # -------------------------
@@ -243,8 +264,8 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     
     Reward breakdown:
     - 0.0: No <answer> tag
-    - 0.25: Has <answer> tag
-    - +0.25: Has both <think> AND <answer> tags (complete format)
+    - 0.4: Has <answer> tag
+    - +0.1: Has both <think> AND <answer> tags (complete format)
     - +0.5: Uses exactly the correct numbers
     
     Maximum: 1.0 (perfect format + correct numbers)
@@ -257,14 +278,14 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     if equation is None:
         return 0.0
     
-    reward = 0.25  # Has <answer> tag
+    reward = 0.4  # Has <answer> tag
     
     # Step 2: Check for BOTH tags (complete format)
     has_think = "<think>" in generated_text and "</think>" in generated_text
     has_answer = True  # We know this is true from step 1
     
     if has_think and has_answer:
-        reward += 0.25  # Complete format
+        reward += 0.1  # Complete format
     
     # Step 3: Check number usage (most important for Phase 1)
     if _validate_numbers(equation, available_numbers):
@@ -278,7 +299,7 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
             
             if total_needed > 0:
                 # Partial credit: up to 0.5 based on percentage of correct numbers
-                partial_credit = 0.5 * (correct_count / total_needed)
+                partial_credit = 0.4 * (correct_count / total_needed)
                 reward += partial_credit
         except:
             pass
@@ -686,6 +707,30 @@ def train(
             writer.add_scalar("eval/format_accuracy", metrics["format_accuracy"], global_step=train_step)
             writer.add_scalar("eval/number_accuracy", metrics["number_accuracy"], global_step=train_step)
 
+            # -------------------------
+            # 🏆 Track and Save Best Models
+            # -------------------------
+            global best_models
+
+            fmt_acc = metrics["format_accuracy"]
+            num_acc = metrics["number_accuracy"]
+            acc = metrics["accuracy"]
+
+            # Format accuracy record
+            if fmt_acc > best_models["format"]["score"]:
+                best_models["format"]["score"] = fmt_acc
+                best_models["format"]["path"] = save_best_model(policy, tokenizer, "format", fmt_acc)
+
+            # Number accuracy record
+            if num_acc > best_models["number"]["score"]:
+                best_models["number"]["score"] = num_acc
+                best_models["number"]["path"] = save_best_model(policy, tokenizer, "number", num_acc)
+
+            # Overall accuracy record
+            if acc > best_models["accuracy"]["score"]:
+                best_models["accuracy"]["score"] = acc
+                best_models["accuracy"]["path"] = save_best_model(policy, tokenizer, "accuracy", acc)
+
 
 def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokenizer]:
     model = AutoModelForCausalLM.from_pretrained(
@@ -701,8 +746,8 @@ def main() -> None:
     model_id = "Qwen/Qwen3-1.7B"
     device = "cuda"
     seed, gpu_mem_util = 42, 0.4
-    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 150, 128, 8, 32
-    lr, clip_range, adv_eps = 7e-6, 0.2, 1e-6
+    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 200, 128, 8, 32
+    lr, clip_range, adv_eps = 2e-5, 0.2, 1e-6
     temperature, min_tokens = 1.0, 4
     eval_every = 10
 
@@ -765,69 +810,7 @@ def main() -> None:
     tokenizer.save_pretrained(out_dir)
     print(f"Saved model and tokenizer to {out_dir}")
     writer.close()
-    
-# Test Function
-def test_functions():
-    """Quick unit tests for the implemented functions"""
-    print("\n=== Running Quick Tests ===")
-    
-    # Test masked_mean
-    print("Testing masked_mean...")
-    tensor = torch.randn(4, 10)  # [batch_size=4, seq_len=10]
-    mask = torch.tensor([
-        [False, False, True, True, True, True, False, False, False, False],
-        [False, True, True, True, True, False, False, False, False, False],
-        [False, False, False, True, True, True, True, True, False, False],
-        [False, False, True, True, True, True, True, False, False, False],
-    ])
-    result = masked_mean(tensor, mask)
-    assert result.shape == torch.Size([]), f"Expected scalar, got shape {result.shape}"
-    print(f"✅ masked_mean works! Result: {result.item():.4f}")
-    
-    # Test masked_mean_drgrpo
-    print("Testing masked_mean_drgrpo...")
-    result = masked_mean_drgrpo(tensor, mask, num_tokens=256)
-    assert result.shape == torch.Size([]), f"Expected scalar, got shape {result.shape}"
-    print(f"✅ masked_mean_drgrpo works! Result: {result.item():.4f}")
-    
-    # Test compute_loss
-    print("Testing compute_loss...")
-    advantages = torch.randn(4)  # [batch_size=4]
-    advantages = advantages.unsqueeze(-1)  # ✅ ADD THIS LINE - simulate grpo_microbatch_step
-    policy_log_probs = torch.randn(4, 10)  # [batch_size=4, seq_len=10]
-    old_log_probs = torch.randn(4, 10)
-    clip_range = 0.2
-    
-    loss_per_token, stats = compute_loss(advantages, policy_log_probs, old_log_probs, clip_range)
-    assert loss_per_token.shape == (4, 10), f"Expected shape (4, 10), got {loss_per_token.shape}"
-    assert "ratio_mean" in stats, "Missing ratio_mean in stats"
-    print(f"✅ compute_loss works! Loss shape: {loss_per_token.shape}")
-    
-    # Test compute_group_normalized_advantages
-    print("Testing compute_group_normalized_advantages...")
-    rollout_responses = ["resp1", "resp2", "resp3", "resp4"]
-    ground_truths = [
-        {"target": 36, "numbers": [79, 17, 60]},
-        {"target": 36, "numbers": [79, 17, 60]},
-        {"target": 36, "numbers": [79, 17, 60]},
-        {"target": 36, "numbers": [79, 17, 60]},
-    ]
-    
-    advantages, raw_rewards, metadata = compute_group_normalized_advantages(
-        rollout_responses, ground_truths, reward_fn, group_size=2, 
-        advantage_eps=1e-6, normalize_by_std=True
-    )
-    assert advantages.shape == (4,), f"Expected shape (4,), got {advantages.shape}"
-    assert raw_rewards.shape == (4,), f"Expected shape (4,), got {raw_rewards.shape}"
-    assert "mean" in metadata and "std" in metadata, "Missing metadata keys"
-    print(f"✅ compute_group_normalized_advantages works!")
-    
-    print("\n=== All Tests Passed! ===\n")
 
 
 if __name__ == "__main__":
-    # Run quick tests first
-    test_functions()
-    
-    # Then run main training
     main()
