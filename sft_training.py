@@ -207,7 +207,7 @@ if __name__ == "__main__":
         num_epochs=3,
         batch_size=4,
         learning_rate=2e-5,
-        max_length=256,
+        max_length=512,
     )
     
     print(f"\n🎉 All done! Model saved at: {final_dir}")
