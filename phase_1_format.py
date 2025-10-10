@@ -364,6 +364,7 @@ def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List
         "count_both_tags": count_has_both_tags,
         "count_correct_numbers": count_correct_numbers,
         "avg_output_tokens": avg_output_tokens,
+        "accuracy": number_accuracy,
     }
     return metrics
 
