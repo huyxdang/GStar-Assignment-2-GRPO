@@ -1,4 +1,20 @@
-# phase 1
+# starter.py
+
+# In this assignment, you'll implement the core components of the
+# Group-Reward Policy Optimization (GRPO) algorithm. You'll be working with a
+# math-solving task called "Countdown," where the model has to generate an
+# equation to reach a target number using a given set of numbers.
+#
+# You will need to implement six key functions:
+# 1. `_extract_answer`: To parse the model's response.
+# 2. `_validate_numbers`: To ensure the generated equation uses the correct numbers.
+# 3. `_evaluate_equation`: To safely calculate the result of the generated equation.
+# 4. `reward_fn`: To score the model's generated equations using the helpers.
+# 5. `compute_group_normalized_advantages`: To calculate advantages.
+# 6. `compute_loss`: To compute per-token loss.
+# 7. `masked_mean`: To compute the mean of masked tensor, used in GRPO
+# 8. `masked_mean_drgrpo`: To compute the mean of masked tensor, used in DR-GRPO
+# ==============================================================================
 
 import os
 import datetime
@@ -35,7 +51,7 @@ def get_constant_schedule_with_warmup(optimizer: torch.optim.Optimizer, num_warm
 # -------------------------
 TEMPLATE = """Using the numbers {numbers}, create an equation that equals {target}. 
 You can use basic arithmetic operations (+, -, *, /) and each number can only be used once.
-Show your reasoning in <think> </think> tags. And return the final equation in <answer> </answer> tags. Must keep reasoning under {max_tokens} tokens.
+Show your reasoning in <think> </think> tags. And return the final equation in <answer> </answer> tags. Keep your reasoning under {max_tokens} tokens.
 For example, numbers = [1, 2, 3, 4] and target = 5, the answer is <answer>(1 + 2) * 3 - 4</answer>."""
 
 
@@ -197,6 +213,7 @@ def _evaluate_equation(equation_str: str) -> float | None:
         return None
     ### END YOUR CODE ###
 
+
 # ==============================================================================
 # TASK 2: Implement the Reward Function
 # ==============================================================================
@@ -269,55 +286,9 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     return reward
 
 
-
-# ==============================================================================
-# PHASE 1 SUCCESS CRITERIA
-# ==============================================================================
-def check_phase1_readiness(eval_metrics: Dict) -> bool:
-    """
-    Check if Phase 1 training is complete and ready for Phase 2.
-    
-    Criteria:
-    - >85% of responses have both <think> and <answer> tags
-    - >90% of responses use correct numbers
-    - Mean reward >0.75
-    """
-    # You'll need to track these in your evaluation
-    format_accuracy = eval_metrics.get("format_accuracy", 0.0)
-    number_accuracy = eval_metrics.get("number_accuracy", 0.0)
-    mean_reward = eval_metrics.get("mean_reward", 0.0)
-    
-    format_ready = format_accuracy > 85.0
-    numbers_ready = number_accuracy > 90.0
-    reward_ready = mean_reward > 0.75
-    
-    print(f"\n{'='*60}")
-    print("Phase 1 Readiness Check:")
-    print(f"{'='*60}")
-    print(f"Format Accuracy: {format_accuracy:.1f}% {'✅' if format_ready else '❌'} (need >85%)")
-    print(f"Number Accuracy: {number_accuracy:.1f}% {'✅' if numbers_ready else '❌'} (need >90%)")
-    print(f"Mean Reward: {mean_reward:.3f} {'✅' if reward_ready else '❌'} (need >0.75)")
-    print(f"{'='*60}")
-    
-    ready = format_ready and numbers_ready and reward_ready
-    
-    if ready:
-        print("✅ Phase 1 COMPLETE! Ready for Phase 2.")
-    else:
-        print("⏳ Continue Phase 1 training...")
-    
-    return ready
-
-
 def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List[str], eval_answers: List[Dict]) -> Dict[str, Any]:
     rollouts = llm.generate(eval_prompts, sampling_params)
     examples, rewards, output_token_lengths = [], [], []
-
-    # New counters
-    count_has_answer = 0
-    count_has_both_tags = 0
-    count_correct_numbers = 0
-
     for rollout, gt in zip(rollouts, eval_answers):
         response_text = rollout.outputs[0].text
         reward_value = reward_fn(response_text, gt)
@@ -325,49 +296,25 @@ def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List
         result = _evaluate_equation(equation) if equation is not None else None
         output_tokens = len(llm.llm_engine.tokenizer.encode(response_text))
         output_token_lengths.append(output_tokens)
-
-        # --- new stats ---
-        has_answer = "<answer>" in response_text and "</answer>" in response_text
-        has_think = "<think>" in response_text and "</think>" in response_text
-        if has_answer:
-            count_has_answer += 1
-        if has_answer and has_think:
-            count_has_both_tags += 1
-        if equation and _validate_numbers(equation, gt["numbers"]):
-            count_correct_numbers += 1
-        # -----------------
-
         examples.append({
-            "prompt": rollout.prompt, "response": response_text, "answer": gt, 
-            "equation": equation, "result": result, "reward": reward_value, 
-            "output_tokens": output_tokens
+            "prompt": rollout.prompt, "response": response_text, "answer": gt, "equation": equation,
+            "result": result, "reward": reward_value, "output_tokens": output_tokens,
         })
         rewards.append(reward_value)
-
     rewards_tensor = torch.tensor(rewards) if rewards else torch.tensor([0.0])
-    mean_reward = float(rewards_tensor.mean().item())
-    std_reward = float(rewards_tensor.std().item()) if rewards_tensor.numel() > 1 else 0.0
+    tol = 1e-8
+    count_correct = sum(1 for r in rewards if abs(r - 1.0) < tol)
+    count_partial = sum(1 for r in rewards if abs(r - 0.1) < tol)
+    count_failed = sum(1 for r in rewards if abs(r - 0.0) < tol)
+    accuracy = (count_correct / len(rewards)) * 100 if rewards else 0.0
     avg_output_tokens = sum(output_token_lengths) / len(output_token_lengths) if output_token_lengths else 0.0
-
-    total = len(eval_prompts)
-    format_accuracy = 100.0 * count_has_both_tags / total
-    number_accuracy = 100.0 * count_correct_numbers / total
-
-    metrics = {
-        "mean_reward": mean_reward,
-        "std_reward": std_reward,
-        "num_examples": total,
-        "examples": examples,
-        "format_accuracy": format_accuracy,
-        "number_accuracy": number_accuracy,
-        "count_answer": count_has_answer,
-        "count_both_tags": count_has_both_tags,
-        "count_correct_numbers": count_correct_numbers,
+    return {
+        "mean_reward": float(rewards_tensor.mean().item()),
+        "std_reward": float(rewards_tensor.std().item()) if rewards_tensor.numel() > 1 else 0.0,
+        "num_examples": len(rewards), "examples": examples, "count_correct": count_correct,
+        "count_partial": count_partial, "count_failed": count_failed, "accuracy": accuracy,
         "avg_output_tokens": avg_output_tokens,
-        "accuracy": number_accuracy,
     }
-    return metrics
-
 
 
 def _format_eval_example(example: Dict[str, Any]) -> str:
@@ -686,33 +633,6 @@ def train(
         if train_step % eval_every == 0:
             metrics = evaluate_model(llm, sampling_params, eval_prompts, eval_answers)
             log_eval(metrics, writer, train_step)
-
-            # 🔍 Extra logging
-            writer.add_scalar("eval/format_accuracy", metrics["format_accuracy"], global_step=train_step)
-            writer.add_scalar("eval/number_accuracy", metrics["number_accuracy"], global_step=train_step)
-            writer.add_scalar("eval/mean_reward", metrics["mean_reward"], global_step=train_step)
-
-            # ✅ Phase 1 readiness check
-            ready = check_phase1_readiness(metrics)
-            if ready:
-                print(f"🎯 Early stopping at step {train_step}: Phase 1 criteria met!")
-
-                # 🧠 Save checkpoint immediately
-                timestamp = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
-                phase1_dir = os.path.join("./output", f"phase1_complete_{timestamp}")
-                os.makedirs(phase1_dir, exist_ok=True)
-                policy.save_pretrained(phase1_dir)
-                tokenizer.save_pretrained(phase1_dir)
-
-                # Save readable summary file
-                summary_path = os.path.join(phase1_dir, "phase1_summary.txt")
-                with open(summary_path, "w") as f:
-                    f.write(f"Phase 1 Summary ({datetime.datetime.now()}):\n")
-                    f.write(f"Format Accuracy: {metrics['format_accuracy']:.2f}%\n")
-                    f.write(f"Number Accuracy: {metrics['number_accuracy']:.2f}%\n")
-                    f.write(f"Mean Reward: {metrics['mean_reward']:.3f}\n")
-                print(f"💾 Saved successful Phase 1 model and summary to {phase1_dir}")
-                break
 
 
 def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokenizer]:
