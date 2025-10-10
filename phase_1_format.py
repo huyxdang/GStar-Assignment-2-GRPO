@@ -1,4 +1,4 @@
-# phase_1_format.py
+# phase 1
 
 import os
 import datetime
@@ -35,7 +35,7 @@ def get_constant_schedule_with_warmup(optimizer: torch.optim.Optimizer, num_warm
 # -------------------------
 TEMPLATE = """Using the numbers {numbers}, create an equation that equals {target}. 
 You can use basic arithmetic operations (+, -, *, /) and each number can only be used once.
-Show your reasoning in <think> </think> tags. And return the final equation in <answer> </answer> tags. Must keep your reasoning under {max_tokens} tokens.
+Show your reasoning in <think> </think> tags. And return the final equation in <answer> </answer> tags. Must keep reasoning under {max_tokens} tokens.
 For example, numbers = [1, 2, 3, 4] and target = 5, the answer is <answer>(1 + 2) * 3 - 4</answer>."""
 
 
@@ -64,19 +64,16 @@ def load_policy_into_vllm_instance(policy: PreTrainedModel, llm: LLM) -> None:
 
 
 def init_sampling_params(temperature: float, min_tokens: int, max_tokens: int) -> SamplingParams:
-    # Request per-token logprobs for the sampled token (vLLM: set logprobs >= 1)
     sp = SamplingParams(
-        temperature=max(0.1, float(temperature)),
-        top_p=0.9,
+        temperature=temperature,
+        top_p=1.0,
         min_tokens=min_tokens,
         max_tokens=max_tokens,
-        logprobs=5,                 # ask for top-5 so the sampled token is included reliably
+        logprobs=0,
     )
-    # Stop immediately after the final answer to avoid long reasoning drift
     sp.stop = ["</answer>"]
     sp.include_stop_str_in_output = True
     return sp
-
 
 
 # Tokenization utilities
@@ -205,6 +202,24 @@ def _evaluate_equation(equation_str: str) -> float | None:
 # ==============================================================================
 def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     """
+    Reward function for countdown math problems.
+
+    Your goal is to score the `generated_text` using the helper functions you just wrote.
+    The function should return a dictionary with a "reward" key.
+
+    Scoring criteria:
+    - 1.0 (Perfect): The equation is valid, uses the correct numbers, and evaluates to the target.
+    - 0.1 (Partial): The text contains an <answer> tag, but the equation is incorrect for any reason.
+    - 0.0 (Failed): The `generated_text` does not contain an <answer> tag.
+
+    Args:
+        generated_text: The full text output from the language model.
+        ground_truth: A dictionary containing `target` and `numbers`.
+
+    Returns:
+        A float value representing the reward, such as 1.0, 0.1, or 0.0
+    """
+    """
     Phase 1: Focus on perfect formatting and correct number usage.
     
     Goal: Train model to ALWAYS output both tags and use correct numbers.
@@ -253,6 +268,8 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     
     return reward
 
+
+
 # ==============================================================================
 # PHASE 1 SUCCESS CRITERIA
 # ==============================================================================
@@ -292,10 +309,15 @@ def check_phase1_readiness(eval_metrics: Dict) -> bool:
     return ready
 
 
-
 def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List[str], eval_answers: List[Dict]) -> Dict[str, Any]:
     rollouts = llm.generate(eval_prompts, sampling_params)
     examples, rewards, output_token_lengths = [], [], []
+
+    # New counters
+    count_has_answer = 0
+    count_has_both_tags = 0
+    count_correct_numbers = 0
+
     for rollout, gt in zip(rollouts, eval_answers):
         response_text = rollout.outputs[0].text
         reward_value = reward_fn(response_text, gt)
@@ -303,25 +325,48 @@ def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List
         result = _evaluate_equation(equation) if equation is not None else None
         output_tokens = len(llm.llm_engine.tokenizer.encode(response_text))
         output_token_lengths.append(output_tokens)
+
+        # --- new stats ---
+        has_answer = "<answer>" in response_text and "</answer>" in response_text
+        has_think = "<think>" in response_text and "</think>" in response_text
+        if has_answer:
+            count_has_answer += 1
+        if has_answer and has_think:
+            count_has_both_tags += 1
+        if equation and _validate_numbers(equation, gt["numbers"]):
+            count_correct_numbers += 1
+        # -----------------
+
         examples.append({
-            "prompt": rollout.prompt, "response": response_text, "answer": gt, "equation": equation,
-            "result": result, "reward": reward_value, "output_tokens": output_tokens,
+            "prompt": rollout.prompt, "response": response_text, "answer": gt, 
+            "equation": equation, "result": result, "reward": reward_value, 
+            "output_tokens": output_tokens
         })
         rewards.append(reward_value)
+
     rewards_tensor = torch.tensor(rewards) if rewards else torch.tensor([0.0])
-    tol = 1e-8
-    count_correct = sum(1 for r in rewards if abs(r - 1.0) < tol)
-    count_partial = sum(1 for r in rewards if abs(r - 0.1) < tol)
-    count_failed = sum(1 for r in rewards if abs(r - 0.0) < tol)
-    accuracy = (count_correct / len(rewards)) * 100 if rewards else 0.0
+    mean_reward = float(rewards_tensor.mean().item())
+    std_reward = float(rewards_tensor.std().item()) if rewards_tensor.numel() > 1 else 0.0
     avg_output_tokens = sum(output_token_lengths) / len(output_token_lengths) if output_token_lengths else 0.0
-    return {
-        "mean_reward": float(rewards_tensor.mean().item()),
-        "std_reward": float(rewards_tensor.std().item()) if rewards_tensor.numel() > 1 else 0.0,
-        "num_examples": len(rewards), "examples": examples, "count_correct": count_correct,
-        "count_partial": count_partial, "count_failed": count_failed, "accuracy": accuracy,
+
+    total = len(eval_prompts)
+    format_accuracy = 100.0 * count_has_both_tags / total
+    number_accuracy = 100.0 * count_correct_numbers / total
+
+    metrics = {
+        "mean_reward": mean_reward,
+        "std_reward": std_reward,
+        "num_examples": total,
+        "examples": examples,
+        "format_accuracy": format_accuracy,
+        "number_accuracy": number_accuracy,
+        "count_answer": count_has_answer,
+        "count_both_tags": count_has_both_tags,
+        "count_correct_numbers": count_correct_numbers,
         "avg_output_tokens": avg_output_tokens,
     }
+    return metrics
+
 
 
 def _format_eval_example(example: Dict[str, Any]) -> str:
@@ -553,210 +598,41 @@ def duplicate_data(arr: List, group_size: int) -> List:
     return [x for x in arr for _ in range(group_size)]
 
 
-def rollout_with_vllm(
-    policy: PreTrainedModel,
-    llm: LLM,
-    sampling_params: SamplingParams,
-    prompts_batch: List[str],
-    group_size: int
-) -> Tuple[List[str], List[str], List[int], List[List[float]]]:
-    """
-    Returns:
-      rollout_input_text:  list[str]  (len = batch*group)
-      rollout_response_text: list[str] (len = batch*group)
-      rollout_output_tokens: list[int] (token counts of response_text)
-      rollout_vllm_logprobs: list[list[float]] (per-sample, per generated token logprob)
-    """
+def rollout_with_vllm(policy: PreTrainedModel, llm: LLM, sampling_params: SamplingParams, prompts_batch: List[str], group_size: int) -> Tuple[List[str], List[str], List[int]]:
     load_policy_into_vllm_instance(policy, llm)
     prompts_dup = duplicate_data(prompts_batch, group_size)
     vllm_rollouts = llm.generate(prompts_dup, sampling_params, use_tqdm=False)
-
     rollout_input_text, rollout_response_text, rollout_output_tokens = [], [], []
-    rollout_vllm_logprobs: List[List[float]] = []
-
-    def _extract_selected_logprobs(vllm_output) -> List[float]:
-        """
-        Robustly extract the logprob of the ACTUALLY SAMPLED token at each step.
-        Works for vLLM v0/v1 TokenLogprob objects that expose `.id` and `.logprob`
-        and for dict-like fallbacks. If the sampled token isn't present in top-k
-        (rare with logprobs=5), we fallback to the largest top logprob.
-        """
-        selected = []
-        top_lists = getattr(vllm_output, "logprobs", None)
-        token_ids = getattr(vllm_output, "token_ids", None)
-        if top_lists is None or token_ids is None:
-            # No per-token logprobs available; return empty to be handled later.
-            return selected
-        for t, top in enumerate(top_lists):
-            lp = None
-            if top is not None:
-                # vLLM commonly returns a list of TokenLogprob with fields .id and .logprob
-                try:
-                    # Try to find the sampled token id in the top list
-                    for tlp in top:
-                        # tlp may be an object or a dict
-                        tlp_id = getattr(tlp, "id", None)
-                        if tlp_id is None and isinstance(tlp, dict):
-                            tlp_id = tlp.get("id")
-                        if tlp_id == token_ids[t]:
-                            lp = float(getattr(tlp, "logprob", tlp.get("logprob")))
-                            break
-                    if lp is None:
-                        # Fallback: take the highest logprob from the top list
-                        if len(top) > 0:
-                            first = top[0]
-                            lp = float(getattr(first, "logprob", first.get("logprob", 0.0)))
-                except Exception:
-                    # Ultra-conservative fallback
-                    lp = 0.0
-            else:
-                lp = 0.0
-            selected.append(lp)
-        return selected
-
     for rollout in vllm_rollouts:
         for r in rollout.outputs:
             rollout_input_text.append(rollout.prompt)
             rollout_response_text.append(r.text)
             rollout_output_tokens.append(len(llm.llm_engine.tokenizer.encode(r.text)))
-            rollout_vllm_logprobs.append(_extract_selected_logprobs(r))
-
-    return rollout_input_text, rollout_response_text, rollout_output_tokens, rollout_vllm_logprobs
+    return rollout_input_text, rollout_response_text, rollout_output_tokens
 
 
-
-def tokenize_rollouts(
-    rollout_input_text: List[str],
-    rollout_response_text: List[str],
-    tokenizer: AutoTokenizer,
-    response_token_logprobs: List[List[float]],  # from vLLM, per generated token
-) -> Dict[str, torch.Tensor]:
-    """
-    Builds input_ids, labels, response_mask, and vllm_logprobs (aligned with labels).
-    - vllm_logprobs has the same shape as labels and is only filled on response tokens.
-    """
-    batch_data = []
-    max_len = 0
-    for prompt, output in zip(rollout_input_text, rollout_response_text):
-        prompt_tokens = tokenizer(prompt)["input_ids"]
-        output_tokens = tokenizer(output)["input_ids"]
-        combined = prompt_tokens + output_tokens
-        max_len = max(max_len, len(combined))
-        batch_data.append({
-            "tokens": combined,
-            "prompt_len": len(prompt_tokens),
-            "total_len": len(combined),
-        })
-
-    batch_size = len(batch_data)
-    # (seq_len - 1) because we shift labels
-    input_ids = torch.full((batch_size, max_len - 1), tokenizer.eos_token_id, dtype=torch.long)
-    labels = torch.full((batch_size, max_len - 1), tokenizer.eos_token_id, dtype=torch.long)
-    response_mask = torch.zeros((batch_size, max_len - 1), dtype=torch.bool)
-    vllm_logprobs = torch.zeros((batch_size, max_len - 1), dtype=torch.float32)  # aligned with labels
-
-    for i, data in enumerate(batch_data):
-        tokens = torch.tensor(data["tokens"], dtype=torch.long)
-        seq_len = len(tokens)
-        # standard next-token setup
-        input_ids[i, :seq_len - 1] = tokens[:-1]
-        labels[i, :seq_len - 1] = tokens[1:]
-        # response span: we consider label positions from (prompt_len - 1) .. (seq_len - 2)
-        response_start = data["prompt_len"] - 1
-        response_end = seq_len - 1
-        if response_end > response_start:
-            response_mask[i, response_start:response_end] = True
-
-            # Fill vLLM logprobs on the response region
-            # response_token_logprobs[i] is len == number of generated tokens
-            lp = response_token_logprobs[i] if i < len(response_token_logprobs) else []
-            # Truncate or pad silently to fit the mask length
-            needed = response_end - response_start
-            if len(lp) < needed:
-                lp = lp + [0.0] * (needed - len(lp))
-            elif len(lp) > needed:
-                lp = lp[:needed]
-            vllm_logprobs[i, response_start:response_end] = torch.tensor(lp, dtype=torch.float32)
-
-    return {
-        "input_ids": input_ids,
-        "labels": labels,
-        "response_mask": response_mask,
-        "vllm_logprobs": vllm_logprobs,
-    }
-
+def tokenize_rollouts(rollout_input_text: List[str], rollout_response_text: List[str], tokenizer: AutoTokenizer) -> Dict[str, torch.Tensor]:
+    return tokenize_prompt_and_output(rollout_input_text, rollout_response_text, tokenizer)
 
 
 def grpo_microbatch_step(
-    policy: PreTrainedModel,
-    input_ids: torch.Tensor,
-    labels: torch.Tensor,
-    response_mask: torch.Tensor,
-    advantages_per_seq: torch.Tensor,
-    gradient_accumulation_steps: int,
-    clip_range: float,
-    loss_type: str = "grpo",
-    max_completion_length: int = 512,
-    *,
-    vllm_logprobs: torch.Tensor,     # NEW: per-token sampler logprobs aligned with labels
-    tis_clip: float = 2.0            # NEW: truncation cap for importance ratio
+    policy: PreTrainedModel, input_ids: torch.Tensor, labels: torch.Tensor, response_mask: torch.Tensor,
+    advantages_per_seq: torch.Tensor, gradient_accumulation_steps: int, clip_range: float,
+    loss_type: str = "grpo", max_completion_length: int = 512,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    """
-    Applies Truncated Importance Sampling (TIS) to correct the rollout–learner mismatch:
-
-        rho_tis = clamp( exp(logpi_fsdp - logpi_vllm), max = tis_clip )
-
-    We fold rho_tis into the advantages, then run the standard PPO-style clipped loss.
-    """
-    # Learner logprobs (new policy)
     policy_log_probs = get_response_log_probs(policy, input_ids, labels)
-    old_log_probs = policy_log_probs.detach()  # PPO baseline ratio uses current as "old" per GRPO
-
-    # Expand advantages over token dimension
-    advantages = advantages_per_seq.unsqueeze(-1)  # [B, 1] -> [B, 1,] then broadcast
-
-    # === Truncated Importance Sampling correction ===
-    # Align shapes
-    # policy_log_probs: [B, T], vllm_logprobs: [B, T], response_mask: [B, T]
-    with torch.no_grad():
-        ratio_tis = torch.exp(policy_log_probs - vllm_logprobs)  # learner / sampler likelihood
-        ratio_tis = torch.clamp(ratio_tis, max=tis_clip)
-        # Zero out non-response tokens so they don't affect scaling (keeps broadcast simple)
-        ratio_tis = torch.where(response_mask, ratio_tis, torch.ones_like(ratio_tis))
-
-    # Pre-scale per-token advantages
-    adjusted_advantages = advantages * ratio_tis  # broadcasts over token dimension
-
-    # Compute clipped PPO surrogate with adjusted advantages
-    loss_per_token, metadata = compute_loss(
-        adjusted_advantages, policy_log_probs, old_log_probs, clip_range
-    )
-
-    # Aggregate by mask
+    old_log_probs = policy_log_probs.detach()
+    advantages = advantages_per_seq.unsqueeze(-1)
+    loss_per_token, metadata = compute_loss(advantages, policy_log_probs, old_log_probs, clip_range)
     if loss_type == "grpo":
         loss = masked_mean(loss_per_token, response_mask)
     elif loss_type == "dr_grpo":
         loss = masked_mean_drgrpo(loss_per_token, response_mask, max_completion_length)
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
-
-    # Tiny diagnostics to help you monitor mismatch
-    with torch.no_grad():
-        # Only measure over response tokens
-        resp = response_mask
-        mean_tis = (ratio_tis[resp]).mean().item() if resp.any() else 1.0
-        max_tis = (ratio_tis[resp]).max().item() if resp.any() else 1.0
-        kl_vllm_fsdp = ( (vllm_logprobs - policy_log_probs)[resp] ).mean().neg().item() if resp.any() else 0.0
-        metadata.update({
-            "tis_mean": torch.tensor(mean_tis),
-            "tis_max": torch.tensor(max_tis),
-            "kl_vllm_fsdp": torch.tensor(kl_vllm_fsdp),
-        })
-
     loss = loss / gradient_accumulation_steps
     loss.backward()
     return loss.detach(), metadata
-
 
 
 def train(
@@ -779,71 +655,63 @@ def train(
         log_eval(metrics, writer, train_step)
 
     for _ in range(n_grpo_steps):
-        # ==== SAMPLE BATCH ====
         sampled = random.sample(list(zip(train_prompts, train_answers)), n_prompts_per_rollout_batch)
         prompts_batch, answers_batch = [p for p, _ in sampled], [a for _, a in sampled]
-
-        # ==== ROLLOUT ====
-        rollout_input, rollout_response, rollout_tokens, rollout_vllm_logprobs = rollout_with_vllm(
-            policy, llm, sampling_params, prompts_batch, group_size
-        )
+        rollout_input, rollout_response, rollout_tokens = rollout_with_vllm(policy, llm, sampling_params, prompts_batch, group_size)
         answers_dup = duplicate_data(answers_batch, group_size)
         avg_output_tokens = sum(rollout_tokens) / len(rollout_tokens) if rollout_tokens else 0.0
-
-        # ==== ADVANTAGES ====
         advantages, _, reward_meta = compute_group_normalized_advantages(
             rollout_response, answers_dup, reward_fn, group_size, advantage_eps, use_std_normalization
         )
-
-        # ==== TOKENIZE (+ vLLM logprobs) ====
-        tokenized = tokenize_rollouts(
-            rollout_input, rollout_response, tokenizer, response_token_logprobs=rollout_vllm_logprobs
-        )
-
+        tokenized = tokenize_rollouts(rollout_input, rollout_response, tokenizer)
         optimizer.zero_grad()
         rollout_loss = 0.0
-
-        # ==== MICROBATCH TRAINING ====
         for micro_idx in range(0, rollout_batch_size, micro_train_batch_size):
             s = slice(micro_idx, micro_idx + micro_train_batch_size)
-            loss, meta = grpo_microbatch_step(
-                policy,
-                tokenized["input_ids"][s].to(device),
-                tokenized["labels"][s].to(device),
-                tokenized["response_mask"][s].to(device),
-                advantages[s].to(device),
-                gradient_accumulation_steps,
-                clip_range,
-                loss_type=loss_type,
-                max_completion_length=max_completion_length,
-                vllm_logprobs=tokenized["vllm_logprobs"][s].to(device),  # <-- NEW
-                tis_clip=3.0,  # <-- expose as hyperparam if you like
+            loss, _ = grpo_microbatch_step(
+                policy, tokenized["input_ids"][s].to(device), tokenized["labels"][s].to(device),
+                tokenized["response_mask"][s].to(device), advantages[s].to(device),
+                gradient_accumulation_steps, clip_range, loss_type=loss_type, max_completion_length=max_completion_length
             )
             rollout_loss += float(loss.item())
-
-        # ==== OPTIMIZER STEP ====
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            [p for p in policy.parameters() if p.grad is not None], 1.0
-        )
+        grad_norm = torch.nn.utils.clip_grad_norm_([p for p in policy.parameters() if p.grad is not None], 1.0)
         optimizer.step()
         scheduler.step()
-
         rollout_loss /= (rollout_batch_size / micro_train_batch_size)
         train_step += 1
-
-        # ==== LOGGING ====
-        print(
-            f"Step {train_step} | Loss: {rollout_loss:.4f} | Grad: {grad_norm:.4f} | "
-            f"Reward mean: {reward_meta['mean']:.4f} | Reward std: {reward_meta['std']:.4f} | "
-            f"TIS(mean={meta['tis_mean']:.3f}, max={meta['tis_max']:.3f}) KL(vLLM||FSDP)={meta['kl_vllm_fsdp']:.4f}"
-        )
-
+        print(f"Step {train_step} | Loss: {rollout_loss:.4f} | Grad: {grad_norm:.4f} | "
+              f"Reward mean: {reward_meta['mean']:.4f} | Reward std: {reward_meta['std']:.4f}")
         log_train(rollout_loss, grad_norm, reward_meta, avg_output_tokens, writer, train_step)
-
         if train_step % eval_every == 0:
             metrics = evaluate_model(llm, sampling_params, eval_prompts, eval_answers)
             log_eval(metrics, writer, train_step)
 
+            # 🔍 Extra logging
+            writer.add_scalar("eval/format_accuracy", metrics["format_accuracy"], global_step=train_step)
+            writer.add_scalar("eval/number_accuracy", metrics["number_accuracy"], global_step=train_step)
+            writer.add_scalar("eval/mean_reward", metrics["mean_reward"], global_step=train_step)
+
+            # ✅ Phase 1 readiness check
+            ready = check_phase1_readiness(metrics)
+            if ready:
+                print(f"🎯 Early stopping at step {train_step}: Phase 1 criteria met!")
+
+                # 🧠 Save checkpoint immediately
+                timestamp = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+                phase1_dir = os.path.join("./output", f"phase1_complete_{timestamp}")
+                os.makedirs(phase1_dir, exist_ok=True)
+                policy.save_pretrained(phase1_dir)
+                tokenizer.save_pretrained(phase1_dir)
+
+                # Save readable summary file
+                summary_path = os.path.join(phase1_dir, "phase1_summary.txt")
+                with open(summary_path, "w") as f:
+                    f.write(f"Phase 1 Summary ({datetime.datetime.now()}):\n")
+                    f.write(f"Format Accuracy: {metrics['format_accuracy']:.2f}%\n")
+                    f.write(f"Number Accuracy: {metrics['number_accuracy']:.2f}%\n")
+                    f.write(f"Mean Reward: {metrics['mean_reward']:.3f}\n")
+                print(f"💾 Saved successful Phase 1 model and summary to {phase1_dir}")
+                break
 
 
 def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokenizer]:
