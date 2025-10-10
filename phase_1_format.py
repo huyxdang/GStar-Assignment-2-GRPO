@@ -166,9 +166,9 @@ def _extract_answer(solution_str: str) -> str | None:
     ### END YOUR CODE ###
     
 # Input/Output Format:
-rollout_response = "Okay, let's see. I need to use 79, 17, ... So the equation is ,→ <x> 79 - (60 - 17))</x>"
+rollout_response = "Okay, let's see. I need to use 79, 17, 60. So the equation is ,→ <x> 79 - (60 - 17)</x>"
 extracted_answer = _extract_answer(rollout_response)
-assert extracted_answer == "(79 - (60 - 17))"
+assert extracted_answer == "79 - (60 - 17)"
 print("✅ extract_answer: Test passed!")
 
 
