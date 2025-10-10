@@ -3,3 +3,4 @@ venv/
 base.py
 base_long.py
 .DS_Store
+.env
