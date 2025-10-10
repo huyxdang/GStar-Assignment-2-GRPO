@@ -304,8 +304,8 @@ def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List
     rewards_tensor = torch.tensor(rewards) if rewards else torch.tensor([0.0])
     tol = 1e-8
     count_correct = sum(1 for r in rewards if abs(r - 1.0) < tol)
-    count_partial = sum(1 for r in rewards if abs(r - 0.1) < tol)
-    count_failed = sum(1 for r in rewards if abs(r - 0.0) < tol)
+    count_failed  = sum(1 for r in rewards if abs(r - 0.0) < tol)
+    count_partial = len(rewards) - count_correct - count_failed
     accuracy = (count_correct / len(rewards)) * 100 if rewards else 0.0
     avg_output_tokens = sum(output_token_lengths) / len(output_token_lengths) if output_token_lengths else 0.0
     return {
