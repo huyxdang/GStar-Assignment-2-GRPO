@@ -34,6 +34,14 @@ from datasets import load_dataset
 from torch.utils.tensorboard import SummaryWriter
 import re
 from dotenv import load_dotenv
+import gc
+
+# Clean GPU memory 
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    gc.collect()
+    print("🧹 GPU memory cleared!")
+
 load_dotenv()
 
 logging.getLogger("vllm.engine.scheduler").setLevel(logging.ERROR)

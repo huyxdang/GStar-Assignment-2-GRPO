@@ -577,7 +577,7 @@ def tokenize_rollouts(rollout_input_text: List[str], rollout_response_text: List
 def grpo_microbatch_step(
     policy: PreTrainedModel, input_ids: torch.Tensor, labels: torch.Tensor, response_mask: torch.Tensor,
     advantages_per_seq: torch.Tensor, gradient_accumulation_steps: int, clip_range: float,
-    loss_type: str = "grpo", max_completion_length: int = 256,
+    loss_type: str = "grpo", max_completion_length: int = 512,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     policy_log_probs = get_response_log_probs(policy, input_ids, labels)
     old_log_probs = policy_log_probs.detach()
