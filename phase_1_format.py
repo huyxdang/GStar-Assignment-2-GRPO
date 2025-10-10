@@ -299,7 +299,7 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
             
             if total_needed > 0:
                 # Partial credit: up to 0.5 based on percentage of correct numbers
-                partial_credit = 0.4 * (correct_count / total_needed)
+                partial_credit = 0.5 * (correct_count / total_needed)
                 reward += partial_credit
         except:
             pass
