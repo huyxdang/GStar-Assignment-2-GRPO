@@ -53,7 +53,7 @@ def get_constant_schedule_with_warmup(optimizer: torch.optim.Optimizer, num_warm
 TEMPLATE = """Using the numbers {numbers}, create an equation that equals {target}. 
 You can use basic arithmetic operations (+, -, *, /) and each number can only be used once.
 Show your reasoning in <think> </think> tags. And return the final equation in <answer> </answer> tags. Keep your reasoning under {max_tokens} tokens.
-For example, numbers = [1, 2, 3, 4] and target = 5, the answer is <answer>(1 + 2) * 3 - 4</answer>."""
+For example, using the numbers [1, 2, 3, 4], create an equation that equals 5. The answer is <answer>(1 + 2) * 3 - 4</answer>."""
 
 
 # vLLM utilities
