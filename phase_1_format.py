@@ -278,7 +278,7 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     if equation is None:
         return 0.0
     
-    reward = 0.4  # Has <answer> tag
+    reward = 0.5  # Has <answer> tag
     
     # Step 2: Check for BOTH tags (complete format)
     has_think = "<think>" in generated_text and "</think>" in generated_text
@@ -289,7 +289,7 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     
     # Step 3: Check number usage (most important for Phase 1)
     if _validate_numbers(equation, available_numbers):
-        reward += 0.5  # Perfect number usage
+        reward += 0.4  # Perfect number usage
     else:
         # Give partial credit based on how many numbers are correct
         try:
@@ -299,7 +299,7 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
             
             if total_needed > 0:
                 # Partial credit: up to 0.5 based on percentage of correct numbers
-                partial_credit = 0.5 * (correct_count / total_needed)
+                partial_credit = 0.4 * (correct_count / total_needed)
                 reward += partial_credit
         except:
             pass
