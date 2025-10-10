@@ -289,6 +289,12 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
 def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List[str], eval_answers: List[Dict]) -> Dict[str, Any]:
     rollouts = llm.generate(eval_prompts, sampling_params)
     examples, rewards, output_token_lengths = [], [], []
+
+    # 🔹 New counters
+    count_has_answer = 0
+    count_has_both_tags = 0
+    count_correct_numbers = 0
+
     for rollout, gt in zip(rollouts, eval_answers):
         response_text = rollout.outputs[0].text
         reward_value = reward_fn(response_text, gt)
@@ -296,11 +302,29 @@ def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List
         result = _evaluate_equation(equation) if equation is not None else None
         output_tokens = len(llm.llm_engine.tokenizer.encode(response_text))
         output_token_lengths.append(output_tokens)
+
+        # --- check formatting correctness ---
+        has_answer = "<answer>" in response_text and "</answer>" in response_text
+        has_think = "<think>" in response_text and "</think>" in response_text
+        if has_answer:
+            count_has_answer += 1
+        if has_answer and has_think:
+            count_has_both_tags += 1
+        if equation and _validate_numbers(equation, gt["numbers"]):
+            count_correct_numbers += 1
+        # -------------------------------------
+
         examples.append({
-            "prompt": rollout.prompt, "response": response_text, "answer": gt, "equation": equation,
-            "result": result, "reward": reward_value, "output_tokens": output_tokens,
+            "prompt": rollout.prompt,
+            "response": response_text,
+            "answer": gt,
+            "equation": equation,
+            "result": result,
+            "reward": reward_value,
+            "output_tokens": output_tokens,
         })
         rewards.append(reward_value)
+
     rewards_tensor = torch.tensor(rewards) if rewards else torch.tensor([0.0])
     tol = 1e-8
     count_correct = sum(1 for r in rewards if abs(r - 1.0) < tol)
@@ -308,13 +332,32 @@ def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List
     count_partial = len(rewards) - count_correct - count_failed
     accuracy = (count_correct / len(rewards)) * 100 if rewards else 0.0
     avg_output_tokens = sum(output_token_lengths) / len(output_token_lengths) if output_token_lengths else 0.0
-    return {
+
+    total = len(eval_prompts)
+    format_accuracy = 100.0 * count_has_both_tags / total
+    number_accuracy = 100.0 * count_correct_numbers / total
+
+    metrics = {
         "mean_reward": float(rewards_tensor.mean().item()),
         "std_reward": float(rewards_tensor.std().item()) if rewards_tensor.numel() > 1 else 0.0,
-        "num_examples": len(rewards), "examples": examples, "count_correct": count_correct,
-        "count_partial": count_partial, "count_failed": count_failed, "accuracy": accuracy,
+        "num_examples": len(rewards),
+        "examples": examples,
+        "count_correct": count_correct,
+        "count_partial": count_partial,
+        "count_failed": count_failed,
+        "accuracy": accuracy,
         "avg_output_tokens": avg_output_tokens,
+
+        # ✅ new metrics
+        "count_has_answer": count_has_answer,
+        "count_has_both_tags": count_has_both_tags,
+        "count_correct_numbers": count_correct_numbers,
+        "format_accuracy": format_accuracy,
+        "number_accuracy": number_accuracy,
     }
+
+    return metrics
+
 
 
 def _format_eval_example(example: Dict[str, Any]) -> str:
