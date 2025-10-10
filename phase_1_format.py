@@ -35,7 +35,7 @@ def get_constant_schedule_with_warmup(optimizer: torch.optim.Optimizer, num_warm
 # -------------------------
 TEMPLATE = """Using the numbers {numbers}, create an equation that equals {target}. 
 You can use basic arithmetic operations (+, -, *, /) and each number can only be used once.
-Show your reasoning in <think> </think> tags. And return the final equation in <answer> </answer> tags. Keep your reasoning under {max_tokens} tokens.
+Show your reasoning in <think> </think> tags. And return the final equation in <answer> </answer> tags. Must keep your reasoning under {max_tokens} tokens.
 For example, numbers = [1, 2, 3, 4] and target = 5, the answer is <answer>(1 + 2) * 3 - 4</answer>."""
 
 
@@ -203,85 +203,94 @@ def _evaluate_equation(equation_str: str) -> float | None:
 # ==============================================================================
 # TASK 2: Implement the Reward Function
 # ==============================================================================
-def reward_fn(generated_text: str, ground_truth: Dict, scale_factor: float = 5.0) -> float:
+def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     """
-    Reward function for countdown math problems.
-
-    Your goal is to score the `generated_text` using the helper functions you just wrote.
-    The function should return a dictionary with a "reward" key.
-
-    Scoring criteria:
-    - 1.0 (Perfect): The equation is valid, uses the correct numbers, and evaluates to the target.
-    - 0.1 (Partial): The text contains an <answer> tag, but the equation is incorrect for any reason.
-    - 0.0 (Failed): The `generated_text` does not contain an <answer> tag.
-
-    Args:
-        generated_text: The full text output from the language model.
-        ground_truth: A dictionary containing `target` and `numbers`.
-
-    Returns:
-        A float value representing the reward, such as 1.0, 0.1, or 0.0
+    Phase 1: Focus on perfect formatting and correct number usage.
+    
+    Goal: Train model to ALWAYS output both tags and use correct numbers.
+    
+    Reward breakdown:
+    - 0.0: No <answer> tag
+    - 0.25: Has <answer> tag
+    - +0.25: Has both <think> AND <answer> tags (complete format)
+    - +0.5: Uses exactly the correct numbers
+    
+    Maximum: 1.0 (perfect format + correct numbers)
+    Note: We DON'T care about correctness in Phase 1!
     """
-    target = ground_truth.get("target")
     available_numbers = ground_truth.get("numbers", [])
     
+    # Step 1: Check for <answer> tag
     equation = _extract_answer(generated_text)
     if equation is None:
         return 0.0
     
-    reward = 0.1
+    reward = 0.25  # Has <answer> tag
     
-    if not _validate_numbers(equation, available_numbers):
-        return reward
+    # Step 2: Check for BOTH tags (complete format)
+    has_think = "<think>" in generated_text and "</think>" in generated_text
+    has_answer = True  # We know this is true from step 1
     
-    reward += 0.1
+    if has_think and has_answer:
+        reward += 0.25  # Complete format
     
-    result = _evaluate_equation(equation)
-    if result is None:
-        return reward
-    
-    distance = abs(result - target)
-    
-    if distance < 1e-6:
-        return 1.0
-    
-    # Hybrid approach: linear for small errors, exponential for large
-    if distance <= scale_factor:
-        # Linear decay for small errors
-        distance_reward = 0.8 * (1.0 - distance / (2 * scale_factor))
+    # Step 3: Check number usage (most important for Phase 1)
+    if _validate_numbers(equation, available_numbers):
+        reward += 0.5  # Perfect number usage
     else:
-        # Exponential decay for large errors
-        distance_reward = 0.8 * math.exp(-(distance - scale_factor) / scale_factor) * 0.5
+        # Give partial credit based on how many numbers are correct
+        try:
+            found_numbers = [int(n) for n in re.findall(r"\d+", equation)]
+            correct_count = sum(1 for n in found_numbers if n in available_numbers)
+            total_needed = len(available_numbers)
+            
+            if total_needed > 0:
+                # Partial credit: up to 0.5 based on percentage of correct numbers
+                partial_credit = 0.5 * (correct_count / total_needed)
+                reward += partial_credit
+        except:
+            pass
     
-    return reward + max(0.0, distance_reward)
+    return reward
 
-    # ### YOUR CODE HERE ###
-    # target = ground_truth.get("target")
-    # available_numbers = ground_truth.get("numbers", [])
+# ==============================================================================
+# PHASE 1 SUCCESS CRITERIA
+# ==============================================================================
+def check_phase1_readiness(eval_metrics: Dict) -> bool:
+    """
+    Check if Phase 1 training is complete and ready for Phase 2.
+    
+    Criteria:
+    - >85% of responses have both <think> and <answer> tags
+    - >90% of responses use correct numbers
+    - Mean reward >0.75
+    """
+    # You'll need to track these in your evaluation
+    format_accuracy = eval_metrics.get("format_accuracy", 0.0)
+    number_accuracy = eval_metrics.get("number_accuracy", 0.0)
+    mean_reward = eval_metrics.get("mean_reward", 0.0)
+    
+    format_ready = format_accuracy > 85.0
+    numbers_ready = number_accuracy > 90.0
+    reward_ready = mean_reward > 0.75
+    
+    print(f"\n{'='*60}")
+    print("Phase 1 Readiness Check:")
+    print(f"{'='*60}")
+    print(f"Format Accuracy: {format_accuracy:.1f}% {'✅' if format_ready else '❌'} (need >85%)")
+    print(f"Number Accuracy: {number_accuracy:.1f}% {'✅' if numbers_ready else '❌'} (need >90%)")
+    print(f"Mean Reward: {mean_reward:.3f} {'✅' if reward_ready else '❌'} (need >0.75)")
+    print(f"{'='*60}")
+    
+    ready = format_ready and numbers_ready and reward_ready
+    
+    if ready:
+        print("✅ Phase 1 COMPLETE! Ready for Phase 2.")
+    else:
+        print("⏳ Continue Phase 1 training...")
+    
+    return ready
 
-    # # Extract Equation from <answer>
-    # equation = _extract_answer(generated_text)
-    # if equation is None:
-    #     # No <answer> tag found
-    #     return 0.0
-
-    # # Validate Numbers
-    # if not _validate_numbers(equation, available_numbers):
-    #     # Has <answer> tag, but wrong numbers
-    #     return 0.1
-
-    # # Safely Evaluate
-    # result = _evaluate_equation(equation)
-    # if result is None:
-    #     # Equation invalid for any reason
-    #     return 0.1
-
-    # # Check for Correctness
-    # if abs(result - target) < 1e-6:
-    #     return 1.0
-    # else:
-    #     return 0.1
-    # ### END YOUR CODE ###
 
 
 def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List[str], eval_answers: List[Dict]) -> Dict[str, Any]:
@@ -690,7 +699,7 @@ def grpo_microbatch_step(
     max_completion_length: int = 512,
     *,
     vllm_logprobs: torch.Tensor,     # NEW: per-token sampler logprobs aligned with labels
-    tis_clip: float = 4.0            # NEW: truncation cap for importance ratio
+    tis_clip: float = 2.0            # NEW: truncation cap for importance ratio
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """
     Applies Truncated Importance Sampling (TIS) to correct the rollout–learner mismatch:

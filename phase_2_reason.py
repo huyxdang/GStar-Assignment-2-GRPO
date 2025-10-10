@@ -205,83 +205,64 @@ def _evaluate_equation(equation_str: str) -> float | None:
 # ==============================================================================
 def reward_fn(generated_text: str, ground_truth: Dict, scale_factor: float = 5.0) -> float:
     """
-    Reward function for countdown math problems.
-
-    Your goal is to score the `generated_text` using the helper functions you just wrote.
-    The function should return a dictionary with a "reward" key.
-
-    Scoring criteria:
-    - 1.0 (Perfect): The equation is valid, uses the correct numbers, and evaluates to the target.
-    - 0.1 (Partial): The text contains an <answer> tag, but the equation is incorrect for any reason.
-    - 0.0 (Failed): The `generated_text` does not contain an <answer> tag.
-
-    Args:
-        generated_text: The full text output from the language model.
-        ground_truth: A dictionary containing `target` and `numbers`.
-
-    Returns:
-        A float value representing the reward, such as 1.0, 0.1, or 0.0
+    Phase 2: Focus on getting the correct answer.
+    
+    Assumes: Model already has good formatting from Phase 1.
+    Goal: Train model to find correct solutions.
+    
+    Reward breakdown:
+    - 0.0: Bad format (shouldn't happen often by Phase 2)
+    - 0.3: Has format but wrong numbers (shouldn't happen often)
+    - 0.5: Has format + correct numbers (baseline)
+    - 0.5-1.0: Distance-based reward for how close to target
+    
+    Maximum: 1.0 (perfect answer)
     """
     target = ground_truth.get("target")
     available_numbers = ground_truth.get("numbers", [])
     
+    # Step 1: Check format (should be good by Phase 2)
     equation = _extract_answer(generated_text)
     if equation is None:
-        return 0.0
+        return 0.0  # Rare by Phase 2
     
-    reward = 0.1
-    
+    # Step 2: Check numbers (should be good by Phase 2)
     if not _validate_numbers(equation, available_numbers):
-        return reward
+        return 0.3  # Rare by Phase 2, but give some credit for trying
     
-    reward += 0.1
+    # Step 3: Baseline reward for correct format + numbers
+    reward = 0.5
     
+    # Step 4: Evaluate the equation
     result = _evaluate_equation(equation)
     if result is None:
-        return reward
+        # Syntax error - has correct numbers but malformed equation
+        return 0.5  # Keep baseline, no penalty (it's trying)
     
+    # Step 5: Distance-based reward (0.0 to 0.5 additional)
     distance = abs(result - target)
     
     if distance < 1e-6:
-        return 1.0
+        return 1.0  # Perfect!
     
-    # Hybrid approach: linear for small errors, exponential for large
-    if distance <= scale_factor:
-        # Linear decay for small errors
-        distance_reward = 0.8 * (1.0 - distance / (2 * scale_factor))
+    # Dense reward shaping based on distance
+    if distance <= 1:
+        # Very close (within 1) - nearly perfect
+        distance_reward = 0.5 * (1.0 - distance)
+    elif distance <= scale_factor:
+        # Close (within 5) - good attempt
+        distance_reward = 0.4 * (1.0 - distance / scale_factor)
+    elif distance <= scale_factor * 2:
+        # Somewhat close (within 10) - reasonable attempt
+        distance_reward = 0.3 * (1.0 - distance / (scale_factor * 2))
+    elif distance <= scale_factor * 5:
+        # Far but not terrible (within 25)
+        distance_reward = 0.2 * (1.0 - distance / (scale_factor * 5))
     else:
-        # Exponential decay for large errors
-        distance_reward = 0.8 * math.exp(-(distance - scale_factor) / scale_factor) * 0.5
+        # Very far - small reward for at least getting something
+        distance_reward = 0.1 * math.exp(-distance / (scale_factor * 5))
     
     return reward + max(0.0, distance_reward)
-
-    # ### YOUR CODE HERE ###
-    # target = ground_truth.get("target")
-    # available_numbers = ground_truth.get("numbers", [])
-
-    # # Extract Equation from <answer>
-    # equation = _extract_answer(generated_text)
-    # if equation is None:
-    #     # No <answer> tag found
-    #     return 0.0
-
-    # # Validate Numbers
-    # if not _validate_numbers(equation, available_numbers):
-    #     # Has <answer> tag, but wrong numbers
-    #     return 0.1
-
-    # # Safely Evaluate
-    # result = _evaluate_equation(equation)
-    # if result is None:
-    #     # Equation invalid for any reason
-    #     return 0.1
-
-    # # Check for Correctness
-    # if abs(result - target) < 1e-6:
-    #     return 1.0
-    # else:
-    #     return 0.1
-    # ### END YOUR CODE ###
 
 
 def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List[str], eval_answers: List[Dict]) -> Dict[str, Any]:
