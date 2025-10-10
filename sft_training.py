@@ -2,9 +2,8 @@
 # Supervised fine-tuning for Countdown task format learning
 
 import os
-import json
 import torch
-from torch.utils.data import Dataset
+from datasets import load_dataset, Dataset as HFDataset
 from transformers import (
     AutoModelForCausalLM, 
     AutoTokenizer,
@@ -20,81 +19,102 @@ You can use basic arithmetic operations (+, -, *, /) and each number can only be
 Show your reasoning in <think> </think> tags. And return the final equation in <answer> </answer> tags. Keep your reasoning under 256 tokens.
 For example, numbers = [1, 2, 3, 4] and target = 5, the answer is <answer>(1 + 2) * 3 - 4</answer>."""
 
-class CountdownSFTDataset(Dataset):
+
+def prepare_dataset(dataset_name: str, tokenizer, max_length: int = 512, split: str = "train"):
     """
-    Custom dataset class for Countdown SFT.
-    Uses only 'nums', 'target', and 'completion' fields from your JSONL dataset.
+    Prepare dataset by tokenizing and creating proper format.
     """
-    def __init__(self, jsonl_file: str, tokenizer, max_length: int = 512):
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-
-        # Load JSONL file
-        self.examples = []
-        with open(jsonl_file, 'r') as f:
-            for line in f:
-                ex = json.loads(line)
-                # ✅ Only keep valid entries that have completion field
-                if "completion" in ex and "target" in ex and "nums" in ex:
-                    self.examples.append(ex)
-
-    def __len__(self):
-        return len(self.examples)
-
-    def __getitem__(self, idx):
-        example = self.examples[idx]
-        prompt = TEMPLATE.format(numbers=example["nums"], target=example["target"])
-
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt},
-        ]
-        prompt_formatted = self.tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            tokenize=False
-        )
-
-        completion = example["completion"].strip()
-        full_text = prompt_formatted + completion
-
-        # Tokenize combined text
-        tokenized = self.tokenizer(
-            full_text,
+    # Load from HuggingFace
+    dataset = load_dataset(dataset_name, split=split)
+    
+    def preprocess_function(examples):
+        """Process a batch of examples with fixed-width padding."""
+        prompts = []
+        completions = []
+        
+        # Build prompts and get completions
+        for i in range(len(examples["target"])):
+            prompt = TEMPLATE.format(
+                numbers=examples["nums"][i], 
+                target=examples["target"][i]
+            )
+            
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt},
+            ]
+            prompt_formatted = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=False
+            )
+            
+            prompts.append(prompt_formatted)
+            completions.append(examples["completion"][i].strip())
+        
+        # Combine prompt + completion
+        full_texts = [p + c for p, c in zip(prompts, completions)]
+        
+        # Tokenize full texts with FIXED-WIDTH padding
+        model_inputs = tokenizer(
+            full_texts,
+            max_length=max_length,
             truncation=True,
-            max_length=self.max_length,
-            padding=False,
-            return_tensors=None,
+            padding="max_length",  # ✅ Pad to max_length (fixed-width)
         )
-
-        prompt_len = len(self.tokenizer(prompt_formatted, add_special_tokens=False)["input_ids"])
-        labels = tokenized["input_ids"][:]  # make a shallow copy of list
-        labels[:prompt_len] = [-100] * prompt_len  # mask out the prompt
-
-        return {
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
-            "labels": labels,
-        }
+        
+        # Create labels by masking the prompt part
+        labels = []
+        for i, (prompt, full_text) in enumerate(zip(prompts, full_texts)):
+            # Tokenize just the prompt to find its length
+            prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+            prompt_len = len(prompt_ids)
+            
+            # Create label sequence: -100 for prompt, actual tokens for completion
+            label = model_inputs["input_ids"][i][:]
+            # Mask prompt tokens
+            label[:prompt_len] = [-100] * prompt_len
+            # Mask padding tokens
+            for j in range(len(label)):
+                if model_inputs["input_ids"][i][j] == tokenizer.pad_token_id:
+                    label[j] = -100
+            labels.append(label)
+        
+        model_inputs["labels"] = labels
+        
+        return model_inputs
+    
+    # Process dataset
+    tokenized_dataset = dataset.map(
+        preprocess_function,
+        batched=True,
+        remove_columns=dataset.column_names,
+        desc=f"Tokenizing {split} dataset"
+    )
+    
+    return tokenized_dataset
 
 
 def train_sft(
-    model_id: str = "Qwen/Qwen3-1.7B",
-    train_file: str = "sft_train_gpt4.jsonl",
-    val_file: str = "sft_val_gpt4.jsonl",
+    model_id: str = "Qwen/Qwen2.5-0.5B-Instruct",
+    dataset_name: str = "huyxdang/countdown-format-gpt4",
     output_dir: str = "./sft_checkpoint",
     num_epochs: int = 3,
     batch_size: int = 4,
     learning_rate: float = 2e-5,
     max_length: int = 512,
 ):
-    """Train the model on Countdown SFT dataset."""
+    """Train the model on Countdown SFT dataset from HuggingFace."""
     
-    print("🔹 Loading model and tokenizer...")
+    print("=" * 60)
+    print("🔹 Countdown SFT Training")
+    print("=" * 60)
+    
+    print(f"\n🔹 Loading model and tokenizer: {model_id}")
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        attn_implementation="flash_attention_2" if torch.cuda.is_available() else "eager",
         use_cache=False
     )
     
@@ -102,22 +122,32 @@ def train_sft(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
-    print("🔹 Loading datasets...")
-    train_dataset = CountdownSFTDataset(train_file, tokenizer, max_length)
-    val_dataset = CountdownSFTDataset(val_file, tokenizer, max_length)
+    print(f"\n🔹 Loading and preparing datasets from: {dataset_name}")
+    train_dataset = prepare_dataset(dataset_name, tokenizer, max_length, split="train")
+    val_dataset = prepare_dataset(dataset_name, tokenizer, max_length, split="validation")
     
-    print(f"  Train examples: {len(train_dataset)}")
-    print(f"  Val examples: {len(val_dataset)}")
+    print(f"  ✅ Train examples: {len(train_dataset)}")
+    print(f"  ✅ Val examples: {len(val_dataset)}")
+    
+    # Show a sample
+    print("\n📝 Sample training example (first item):")
+    sample = train_dataset[0]
+    print(f"  Input IDs length: {len(sample['input_ids'])}")
+    print(f"  Labels length: {len(sample['labels'])}")
+    print(f"  Number of -100s (masked): {sum(1 for x in sample['labels'] if x == -100)}")
 
-    # Data collator handles padding dynamically
+    # Data collator for fixed-width tensors (no dynamic padding needed)
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=False,
     )
 
     timestamp = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    run_name = f"sft_countdown_{timestamp}"
+    
     training_args = TrainingArguments(
-        output_dir=f"{output_dir}_{timestamp}",
+        output_dir=f"{output_dir}/{run_name}",
+        run_name=run_name,
         num_train_epochs=num_epochs,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
@@ -126,16 +156,18 @@ def train_sft(
         weight_decay=0.01,
         warmup_steps=100,
         logging_steps=10,
+        eval_strategy="steps",
         eval_steps=100,
         save_steps=100,
         save_total_limit=2,
-        bf16=True,
-        eval_strategy="steps",
+        bf16=torch.cuda.is_available(),
+        fp16=False,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         report_to="tensorboard",
-        remove_unused_columns=False,
+        dataloader_pin_memory=True,
+        dataloader_num_workers=0,  # Set to 0 to avoid multiprocessing issues
     )
 
     trainer = Trainer(
@@ -146,24 +178,36 @@ def train_sft(
         data_collator=data_collator,
     )
 
+    print("\n" + "=" * 60)
     print("🚀 Starting training...")
+    print("=" * 60)
     trainer.train()
 
-    final_output_dir = f"{output_dir}_final_{timestamp}"
-    print(f"💾 Saving final model to {final_output_dir}...")
-    model.save_pretrained(final_output_dir)
+    final_output_dir = f"{output_dir}/final_{timestamp}"
+    print(f"\n💾 Saving final model to {final_output_dir}...")
+    trainer.save_model(final_output_dir)
     tokenizer.save_pretrained(final_output_dir)
+    
+    print("\n" + "=" * 60)
+    print("✅ Training Complete!")
+    print("=" * 60)
+    print(f"Model saved to: {final_output_dir}")
+    print("\nNext steps:")
+    print("1. Test the model with inference")
+    print("2. Use this checkpoint for GRPO training")
 
     return final_output_dir
 
+
 if __name__ == "__main__":
-    train_sft(
-        model_id="Qwen/Qwen3-1.7B",
-        train_file="data/sft_train_gpt4.jsonl",
-        val_file="data/sft_val_gpt4.jsonl",
+    final_dir = train_sft(
+        model_id="Qwen/Qwen2.5-0.5B-Instruct",
+        dataset_name="huyxdang/countdown-format-gpt4",
         output_dir="./sft_checkpoint",
         num_epochs=3,
         batch_size=4,
         learning_rate=2e-5,
-        max_length=512,
+        max_length=256,
     )
+    
+    print(f"\n🎉 All done! Model saved at: {final_dir}")
