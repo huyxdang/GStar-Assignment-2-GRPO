@@ -72,8 +72,8 @@ def save_best_model(policy, tokenizer, category, score, base_dir="./output/best_
 # -------------------------
 TEMPLATE = """Using the numbers {numbers}, create an equation that equals {target}. 
 You can use basic arithmetic operations (+, -, *, /) and each number can only be used once.
-Show your reasoning in <think> </think> tags. And return the final equation in <x> </x> tags. Keep your reasoning under {max_tokens} tokens.
-For example, numbers = [1, 2, 3, 4] and target = 5, the answer is <x>(1 + 2) * 3 - 4</x>."""
+Show your reasoning in <think> </think> tags. And return the final equation in <answer> </answer> tags. Keep your reasoning under {max_tokens} tokens.
+For example, numbers = [1, 2, 3, 4] and target = 5, the answer is <answer>(1 + 2) * 3 - 4</answer>."""
 
 
 # vLLM utilities
@@ -149,7 +149,7 @@ def tokenize_prompt_and_output(prompt_strs: List[str], output_strs: List[str], t
 
 def _extract_answer(solution_str: str) -> str | None:
     """
-    Extract the content from the last <x>...</x> tag in the given string.
+    Extract the content from the last <answer>...</answer> tag in the given string.
 
     Hint: Use the `re` module. `re.finditer` can find all occurrences of a pattern.
     Args:
@@ -161,12 +161,12 @@ def _extract_answer(solution_str: str) -> str | None:
     ### YOUR CODE HERE ###
     if not solution_str:
         return None
-    matches = list(re.finditer(r"<x>\s*(.*?)\s*</x>", solution_str, flags=re.DOTALL | re.IGNORECASE))
+    matches = list(re.finditer(r"<answer>\s*(.*?)\s*</answer>", solution_str, flags=re.DOTALL | re.IGNORECASE))
     return matches[-1].group(1).strip() if matches else None
     ### END YOUR CODE ###
     
 # Input/Output Format:
-rollout_response = "Okay, let's see. I need to use 79, 17, 60. So the equation is ,→ <x> 79 - (60 - 17)</x>"
+rollout_response = "Okay, let's see. I need to use 79, 17, 60. So the equation is <answer> 79 - (60 - 17)</answer>"
 extracted_answer = _extract_answer(rollout_response)
 assert extracted_answer == "79 - (60 - 17)"
 print("✅ extract_answer: Test passed!")
@@ -245,10 +245,10 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     Reward function for Countdown Phase 1 (format-focused).
 
     Reward breakdown:
-    - 0.0: No <x> tag
-    - +0.3: Has <x> tag
+    - 0.0: No <answer> tag
+    - +0.3: Has <answer> tag
     - +0.25: Uses exactly the correct numbers
-    - +0.4: token usage >= 200 
+    - +0.4: token usage >= 100 
     - +0.05: correct answer
     Max = 1.0
     """
@@ -256,12 +256,12 @@ def reward_fn(generated_text: str, ground_truth: Dict) -> float:
     available_numbers = ground_truth.get("numbers", [])
     reward = 0.0
 
-    # Must have <x> tag
+    # Must have <answer> tag
     equation = _extract_answer(generated_text)
     if equation is None:
         return 0.0  # No answer tag → immediate fail
 
-    reward += 0.3  # Base reward for having <x>
+    reward += 0.3  # Base reward for having <answer>
 
     # Check number usage
     if _validate_numbers(equation, available_numbers):
