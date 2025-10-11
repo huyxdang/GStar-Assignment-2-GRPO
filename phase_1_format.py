@@ -384,7 +384,12 @@ def log_train(rollout_batch_loss: float, grad_norm: float, reward_metadata: Dict
     writer.add_scalar("train/reward_mean", float(reward_metadata["mean"]), global_step=step)
     writer.add_scalar("train/reward_std", float(reward_metadata["std"]), global_step=step)
     writer.add_scalar("train/avg_output_tokens", float(avg_output_tokens), global_step=step)
-    print(f"Step {step} | Loss: {rollout_batch_loss:.4f} | Grad norm: {grad_norm:.4f} | Reward mean: {float(reward_metadata['mean']):.4f} | Reward std: {float(reward_metadata['std']):.4f} | Avg output tokens: {avg_output_tokens:.1f}")
+    print(f"Step {step} 
+          | Loss: {rollout_batch_loss:.4f} 
+          | Grad norm: {grad_norm:.4f} 
+          | Reward mean: {float(reward_metadata['mean']):.4f} 
+          | Reward std: {float(reward_metadata['std']):.4f} 
+          | Avg output tokens: {avg_output_tokens:.1f}")
 
 
 def log_eval(metrics: Dict[str, Any], writer: SummaryWriter | None, step: int) -> None:
@@ -682,7 +687,7 @@ def train(
         scheduler.step()
         rollout_loss /= (rollout_batch_size / micro_train_batch_size)
         train_step += 1
-        print(f"Step {train_step} | Loss: {rollout_batch_loss:.6e} | Grad: {grad_norm:.4f} | "
+        print(f"Step {train_step} | Loss: {rollout_loss:.6e} | Grad: {grad_norm:.4f} | "
               f"Reward mean: {reward_meta['mean']:.4f} | Reward std: {reward_meta['std']:.4f}")
         log_train(rollout_loss, grad_norm, reward_meta, avg_output_tokens, writer, train_step)
         if train_step % eval_every == 0:
