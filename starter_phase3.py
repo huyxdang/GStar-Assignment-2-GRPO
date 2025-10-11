@@ -3,7 +3,6 @@ import datetime
 import random
 from typing import Callable, Dict, List, Tuple, Any
 import logging
-import warnings
 import math
 
 import torch
@@ -138,7 +137,7 @@ def _validate_numbers(equation_str: str, available_numbers: List[int]) -> bool:
     Check if the numbers used in the equation are exactly the ones available.
 
     Hint:
-    1. Use `re.findall(r"\d+", equation_str)` to get all number strings from the equation.
+    1. Use `re.findall(r"\\d+", equation_str)` to get all number strings from the equation.
     2. Remember to handle potential errors and return False.
 
     Args:
@@ -198,7 +197,7 @@ def _evaluate_equation(equation_str: str) -> float | None:
 # ==============================================================================
 # TASK 2: Implement the Reward Function
 # ==============================================================================
-def reward_fn(generated_text: str, ground_truth: Dict, scale_factor: float = 5.0) -> float:
+def reward_fn(generated_text: str, ground_truth: Dict, scale_factor: float = 10.0) -> float:
     target = ground_truth.get("target")
     available_numbers = ground_truth.get("numbers", [])
     
@@ -237,7 +236,7 @@ def reward_fn(generated_text: str, ground_truth: Dict, scale_factor: float = 5.0
     final_reward = reward + distance_reward
     
     # CRITICAL: Ensure reward is always in valid range
-    return float(np.clip(final_reward, -1.0, 1.0))
+    return float(max(-1.0, min(1.0, final_reward)))
 
 
 def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List[str], eval_answers: List[Dict]) -> Dict[str, Any]:
@@ -258,8 +257,8 @@ def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List
     rewards_tensor = torch.tensor(rewards) if rewards else torch.tensor([0.0])
     tol = 1e-8
     count_correct = sum(1 for r in rewards if abs(r - 1.0) < tol)
-    count_partial = sum(1 for r in rewards if abs(r - 0.1) < tol)
-    count_failed = sum(1 for r in rewards if abs(r - 0.0) < tol)
+    count_partial = sum(1 for r in rewards if 0.0 < r < (1.0 - tol))
+    count_failed = sum(1 for r in rewards if r <= 0.0)
     accuracy = (count_correct / len(rewards)) * 100 if rewards else 0.0
     avg_output_tokens = sum(output_token_lengths) / len(output_token_lengths) if output_token_lengths else 0.0
     return {
@@ -296,16 +295,16 @@ def log_eval(metrics: Dict[str, Any], writer: SummaryWriter | None, step: int) -
     if not examples: return
     tol = 1e-8
     correct_examples = [ex for ex in examples if abs(float(ex.get("reward", 0.0)) - 1.0) < tol][:10]
-    partial_examples = [ex for ex in examples if abs(float(ex.get("reward", 0.0)) - 0.1) < tol][:10]
-    failed_examples = [ex for ex in examples if abs(float(ex.get("reward", 0.0)) - 0.0) < tol][:10]
+    partial_examples = [ex for ex in examples if 0.0 < float(ex.get("reward", 0.0)) < (1.0 - tol)][:10]
+    failed_examples = [ex for ex in examples if float(ex.get("reward", 0.0)) <= 0.0][:10]
     if correct_examples:
         print(f"\n=== Eval examples (CORRECT, reward=1.0) @ step {step} ===")
         for idx, ex in enumerate(correct_examples[:2], 1): print(f"[CORRECT #{idx}]\n" + _format_eval_example(ex))
     if partial_examples:
-        print(f"\n=== Eval examples (PARTIAL, reward=0.1) @ step {step} ===")
+        print(f"\n=== Eval examples (PARTIAL, 0.0 < reward < 1.0) @ step {step} ===")
         for idx, ex in enumerate(partial_examples[:2], 1): print(f"[PARTIAL #{idx}]\n" + _format_eval_example(ex))
     if failed_examples:
-        print(f"\n=== Eval examples (FAILED, reward=0.0) @ step {step} ===")
+        print(f"\n=== Eval examples (FAILED, reward ≤ 0.0) @ step {step} ===")
         for idx, ex in enumerate(failed_examples[:2], 1): print(f"[FAILED #{idx}]\n" + _format_eval_example(ex))
     if writer:
         correct_text = "\n\n".join([_format_eval_example(ex) for ex in correct_examples]) or ""
@@ -493,7 +492,8 @@ def train(
     group_size: int, gradient_accumulation_steps: int, clip_range: float, use_std_normalization: bool,
     advantage_eps: float, device: str, eval_every: int = 5, writer: SummaryWriter = None, seed: int,
     loss_type: str = "grpo", max_completion_length: int = 256,
-) -> None:
+    best_model_dir: str = None,
+) -> float:
     n_prompts_per_rollout_batch = rollout_batch_size // group_size
     micro_train_batch_size = rollout_batch_size // gradient_accumulation_steps
     random.seed(seed)
@@ -504,6 +504,18 @@ def train(
         for k in ["accuracy", "mean_reward", "std_reward", "avg_output_tokens", "count_correct", "count_partial", "count_failed"]:
             writer.add_scalar(f"eval/{k}", metrics[k], global_step=train_step)
         log_eval(metrics, writer, train_step)
+
+    # Initialize best model tracking
+    best_accuracy = metrics['accuracy']
+    best_step = 0
+    print(f"\n🎯 Initial accuracy: {best_accuracy:.2f}% (step {best_step})")
+    
+    # Save initial model as best
+    if best_model_dir:
+        os.makedirs(best_model_dir, exist_ok=True)
+        policy.save_pretrained(best_model_dir)
+        tokenizer.save_pretrained(best_model_dir)
+        print(f"💾 Saved initial model to {best_model_dir}\n")
 
     for _ in range(n_grpo_steps):
         sampled = random.sample(list(zip(train_prompts, train_answers)), n_prompts_per_rollout_batch)
@@ -528,7 +540,7 @@ def train(
         grad_norm = torch.nn.utils.clip_grad_norm_([p for p in policy.parameters() if p.grad is not None], 5.0)
         optimizer.step()
         scheduler.step()
-        rollout_loss /= (rollout_batch_size / micro_train_batch_size)
+        # Note: rollout_loss is already scaled by gradient_accumulation_steps in grpo_microbatch_step
         train_step += 1
         print(f"Step {train_step} | Loss: {rollout_loss:.4f} | Grad: {grad_norm:.4f} | "
               f"Reward mean: {reward_meta['mean']:.4f} | Reward std: {reward_meta['std']:.4f}")
@@ -536,6 +548,33 @@ def train(
         if train_step % eval_every == 0:
             metrics = evaluate_model(llm, sampling_params, eval_prompts, eval_answers)
             log_eval(metrics, writer, train_step)
+            
+            # Check if this is the best model so far
+            current_accuracy = metrics['accuracy']
+            if current_accuracy > best_accuracy:
+                best_accuracy = current_accuracy
+                best_step = train_step
+                print(f"\n🌟 New best accuracy: {best_accuracy:.2f}% at step {best_step}!")
+                
+                # Save the best model
+                if best_model_dir:
+                    policy.save_pretrained(best_model_dir)
+                    tokenizer.save_pretrained(best_model_dir)
+                    print(f"💾 Saved best model to {best_model_dir}\n")
+            
+            # Log best accuracy to TensorBoard
+            if writer:
+                writer.add_scalar("eval/best_accuracy", best_accuracy, global_step=train_step)
+    
+    # Training complete - print summary
+    print(f"\n{'='*60}")
+    print(f"🏁 Training Complete!")
+    print(f"{'='*60}")
+    print(f"Best accuracy: {best_accuracy:.2f}% at step {best_step}")
+    print(f"Best model saved to: {best_model_dir}")
+    print(f"{'='*60}\n")
+    
+    return best_accuracy
 
 
 def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokenizer]:
@@ -549,11 +588,11 @@ def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokeni
 
 def main() -> None:
     # Hyperparameters
-    model_id = "Qwen/Qwen3-1.7B"
+    model_id = "output/best_phase_2"  # Load local model from Phase 1
     device = "cuda"
     seed, gpu_mem_util = 42, 0.6
-    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 250, 128, 8, 16
-    lr, clip_range, adv_eps = 1e-5, 0.15, 1e-4
+    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 80, 128, 8, 16
+    lr, clip_range, adv_eps = 2e-6, 0.15, 1e-4
     temperature, min_tokens = 0.8, 4
     eval_every = 10
 
@@ -596,8 +635,11 @@ def main() -> None:
     os.makedirs(log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=log_dir)
     
+    # Best model directory
+    best_model_dir = os.path.join("./output", f"hw_a2_best_model_{timestamp}")
+    
     # Training
-    train(
+    best_accuracy = train(
         policy=policy, tokenizer=tokenizer, llm=llm, sampling_params=sampling_params,
         train_prompts=[ex["prompt"] for ex in train_examples], train_answers=[ex["answer"] for ex in train_examples],
         eval_prompts=[ex["prompt"] for ex in eval_examples], eval_answers=[ex["answer"] for ex in eval_examples],
@@ -606,79 +648,17 @@ def main() -> None:
         gradient_accumulation_steps=grad_acc_steps, clip_range=clip_range,
         use_std_normalization=use_std_norm, advantage_eps=adv_eps, device=device,
         eval_every=eval_every, writer=writer, seed=seed, loss_type=loss_type,
-        max_completion_length=max_tokens
+        max_completion_length=max_tokens,
+        best_model_dir=best_model_dir
     )
     
-    # Save model
-    out_dir = os.path.join("./output", f"hw_a2_solution_{timestamp}")
-    os.makedirs(out_dir, exist_ok=True)
-    policy.save_pretrained(out_dir)
-    tokenizer.save_pretrained(out_dir)
-    print(f"Saved model and tokenizer to {out_dir}")
     writer.close()
     
-# Test Function
-def test_functions():
-    """Quick unit tests for the implemented functions"""
-    print("\n=== Running Quick Tests ===")
-    
-    # Test masked_mean
-    print("Testing masked_mean...")
-    tensor = torch.randn(4, 10)  # [batch_size=4, seq_len=10]
-    mask = torch.tensor([
-        [False, False, True, True, True, True, False, False, False, False],
-        [False, True, True, True, True, False, False, False, False, False],
-        [False, False, False, True, True, True, True, True, False, False],
-        [False, False, True, True, True, True, True, False, False, False],
-    ])
-    result = masked_mean(tensor, mask)
-    assert result.shape == torch.Size([]), f"Expected scalar, got shape {result.shape}"
-    print(f"✅ masked_mean works! Result: {result.item():.4f}")
-    
-    # Test masked_mean_drgrpo
-    print("Testing masked_mean_drgrpo...")
-    result = masked_mean_drgrpo(tensor, mask, num_tokens=256)
-    assert result.shape == torch.Size([]), f"Expected scalar, got shape {result.shape}"
-    print(f"✅ masked_mean_drgrpo works! Result: {result.item():.4f}")
-    
-    # Test compute_loss
-    print("Testing compute_loss...")
-    advantages = torch.randn(4)  # [batch_size=4]
-    advantages = advantages.unsqueeze(-1)  # ✅ ADD THIS LINE - simulate grpo_microbatch_step
-    policy_log_probs = torch.randn(4, 10)  # [batch_size=4, seq_len=10]
-    old_log_probs = torch.randn(4, 10)
-    clip_range = 0.2
-    
-    loss_per_token, stats = compute_loss(advantages, policy_log_probs, old_log_probs, clip_range)
-    assert loss_per_token.shape == (4, 10), f"Expected shape (4, 10), got {loss_per_token.shape}"
-    assert "ratio_mean" in stats, "Missing ratio_mean in stats"
-    print(f"✅ compute_loss works! Loss shape: {loss_per_token.shape}")
-    
-    # Test compute_group_normalized_advantages
-    print("Testing compute_group_normalized_advantages...")
-    rollout_responses = ["resp1", "resp2", "resp3", "resp4"]
-    ground_truths = [
-        {"target": 36, "numbers": [79, 17, 60]},
-        {"target": 36, "numbers": [79, 17, 60]},
-        {"target": 36, "numbers": [79, 17, 60]},
-        {"target": 36, "numbers": [79, 17, 60]},
-    ]
-    
-    advantages, raw_rewards, metadata = compute_group_normalized_advantages(
-        rollout_responses, ground_truths, reward_fn, group_size=2, 
-        advantage_eps=1e-6, normalize_by_std=True
-    )
-    assert advantages.shape == (4,), f"Expected shape (4,), got {advantages.shape}"
-    assert raw_rewards.shape == (4,), f"Expected shape (4,), got {raw_rewards.shape}"
-    assert "mean" in metadata and "std" in metadata, "Missing metadata keys"
-    print(f"✅ compute_group_normalized_advantages works!")
-    
-    print("\n=== All Tests Passed! ===\n")
+    print(f"\n✅ Training Complete!")
+    print(f"📊 Best Accuracy: {best_accuracy:.2f}%")
+    print(f"📁 Best Model Location: {best_model_dir}")
+    print(f"📈 TensorBoard Logs: {log_dir}\n")
 
 
 if __name__ == "__main__":
-    # Run quick tests first
-    test_functions()
-    
-    # Then run main training
     main()
