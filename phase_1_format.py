@@ -384,12 +384,14 @@ def log_train(rollout_batch_loss: float, grad_norm: float, reward_metadata: Dict
     writer.add_scalar("train/reward_mean", float(reward_metadata["mean"]), global_step=step)
     writer.add_scalar("train/reward_std", float(reward_metadata["std"]), global_step=step)
     writer.add_scalar("train/avg_output_tokens", float(avg_output_tokens), global_step=step)
-    print(f"Step {step} 
-          | Loss: {rollout_batch_loss:.4f} 
-          | Grad norm: {grad_norm:.4f} 
-          | Reward mean: {float(reward_metadata['mean']):.4f} 
-          | Reward std: {float(reward_metadata['std']):.4f} 
-          | Avg output tokens: {avg_output_tokens:.1f}")
+    print(
+        f"Step {step} | "
+        f"Loss: {rollout_loss:.4f} | "
+        f"Grad norm: {grad_norm:.4f} | "
+        f"Reward mean: {float(reward_metadata['mean']):.4f} | "
+        f"Reward std: {float(reward_metadata['std']):.4f} | "
+        f"Avg output tokens: {avg_output_tokens:.1f}"
+    )
 
 
 def log_eval(metrics: Dict[str, Any], writer: SummaryWriter | None, step: int) -> None:
