@@ -14,10 +14,6 @@
 # 6. `compute_loss`: To compute per-token loss.
 # 7. `masked_mean`: To compute the mean of masked tensor, used in GRPO
 # 8. `masked_mean_drgrpo`: To compute the mean of masked tensor, used in DR-GRPO
-#
-# Additional features:
-# - `compute_kl_divergence`: Computes KL divergence between policy and reference
-# - KL divergence penalty can be optionally enabled to constrain policy updates
 # ==============================================================================
 
 import os
@@ -313,15 +309,13 @@ def _format_eval_example(example: Dict[str, Any]) -> str:
     )
 
 
-def log_train(rollout_batch_loss: float, grad_norm: float, reward_metadata: Dict[str, Any], avg_output_tokens: float, writer: SummaryWriter | None, step: int, kl_penalty: float = 0.0) -> None:
+def log_train(rollout_batch_loss: float, grad_norm: float, reward_metadata: Dict[str, Any], avg_output_tokens: float, writer: SummaryWriter | None, step: int) -> None:
     writer.add_scalar("train/loss", float(rollout_batch_loss), global_step=step)
     writer.add_scalar("train/grad_norm", float(grad_norm), global_step=step)
     writer.add_scalar("train/reward_mean", float(reward_metadata["mean"]), global_step=step)
     writer.add_scalar("train/reward_std", float(reward_metadata["std"]), global_step=step)
     writer.add_scalar("train/avg_output_tokens", float(avg_output_tokens), global_step=step)
-    if kl_penalty > 0.0:
-        writer.add_scalar("train/kl_penalty", float(kl_penalty), global_step=step)
-    print(f"Step {step} | Loss: {rollout_batch_loss:.4f} | Grad norm: {grad_norm:.4f} | Reward mean: {float(reward_metadata['mean']):.4f} | Reward std: {float(reward_metadata['std']):.4f} | Avg output tokens: {avg_output_tokens:.1f}" + (f" | KL penalty: {kl_penalty:.4f}" if kl_penalty > 0.0 else ""))
+    print(f"Step {step} | Loss: {rollout_batch_loss:.4f} | Grad norm: {grad_norm:.4f} | Reward mean: {float(reward_metadata['mean']):.4f} | Reward std: {float(reward_metadata['std']):.4f} | Avg output tokens: {avg_output_tokens:.1f}")
 
 
 def log_eval(metrics: Dict[str, Any], writer: SummaryWriter | None, step: int) -> None:
@@ -350,33 +344,6 @@ def log_eval(metrics: Dict[str, Any], writer: SummaryWriter | None, step: int) -
     print(f"Eval @ step {step}: accuracy={metrics['accuracy']:.1f}% mean_reward={metrics['mean_reward']:.4f} "
           f"avg_tokens={metrics['avg_output_tokens']:.1f} | correct:{metrics['count_correct']} "
           f"partial:{metrics['count_partial']} failed:{metrics['count_failed']}")
-
-
-# -------------------------
-# KL Divergence
-# -------------------------
-def compute_kl_divergence(
-    policy_log_probs: torch.Tensor,
-    ref_log_probs: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Computes the KL divergence between policy and reference distributions.
-    
-    KL(π || π_ref) = E[log π - log π_ref] where expectations are over policy π
-    
-    Args:
-        policy_log_probs: Log probabilities from the current policy [batch_size, seq_len]
-        ref_log_probs: Log probabilities from the reference policy [batch_size, seq_len]
-    
-    Returns:
-        kl_div: Per-token KL divergence [batch_size, seq_len]
-    """
-    # KL divergence for discrete distributions in log space:
-    # KL(p||q) = sum(p * (log_p - log_q))
-    # Since we already have log probs, we compute: exp(log_p) * (log_p - log_q)
-    # This simplifies to: exp(log_p) * log(p/q)
-    kl_div = policy_log_probs - ref_log_probs
-    return kl_div
 
 
 # -------------------------
@@ -467,17 +434,14 @@ def compute_loss(
     policy_log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     clip_range: float,
-    ref_log_probs: torch.Tensor = None,
-    kl_coef: float = 0.0,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """
-    Computes the per-token PPO clipped surrogate loss with optional KL divergence penalty.
+    Computes the per-token PPO clipped surrogate loss.
 
-    KL divergence term:
-    The KL penalty term encourages the policy to stay close to a reference policy,
-    preventing large deviations during training. This is common in RLHF methods like PPO.
-    
-    The final loss becomes: PPO_loss + kl_coef * KL(π || π_ref)
+    Why omit the KL divergence term?
+    For simplicity and following trends in recent RLVR (e.g Dr.GRPO),
+    we omit the KL penalty term often found in PPO. This simplifies the implementation
+    and has been shown to work well in practice.
 
     Steps:
     1. Calculate the probability ratio `pi_ratio = exp(policy_log_probs - old_log_probs)`.
@@ -485,7 +449,6 @@ def compute_loss(
     3. Calculate the clipped term by clipping `pi_ratio` to `[1-clip_range, 1+clip_range]`
        and then multiplying by `advantages`.
     4. The final loss is `-torch.minimum(unclipped_term, clipped_term)`.
-    5. If ref_log_probs is provided, add KL penalty: kl_coef * KL(policy || ref)
     """
     loss = 0.0
     ### YOUR CODE HERE ###
@@ -503,20 +466,12 @@ def compute_loss(
     # 4. Take elementwise minimum and negate (PPO-style objective)
     loss = -torch.minimum(unclipped, clipped)
 
-    # 5. Add KL penalty if reference log probs are provided
-    kl_penalty = torch.zeros_like(loss)
-    if ref_log_probs is not None and kl_coef > 0.0:
-        kl_div = compute_kl_divergence(policy_log_probs, ref_log_probs)
-        kl_penalty = kl_coef * kl_div
-        loss = loss + kl_penalty
-
     # Optional metadata for logging/debugging
     stats = {
         "ratio_mean": pi_ratio.mean(),
         "ratio_std": pi_ratio.std(),
         "ratio_min": pi_ratio.min(),
         "ratio_max": pi_ratio.max(),
-        "kl_penalty_mean": kl_penalty.mean() if kl_coef > 0.0 else torch.tensor(0.0),
     }
     
     ### END YOUR CODE ###
@@ -593,20 +548,11 @@ def grpo_microbatch_step(
     policy: PreTrainedModel, input_ids: torch.Tensor, labels: torch.Tensor, response_mask: torch.Tensor,
     advantages_per_seq: torch.Tensor, gradient_accumulation_steps: int, clip_range: float,
     loss_type: str = "grpo", max_completion_length: int = 512,
-    ref_model: PreTrainedModel = None, kl_coef: float = 0.0,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     policy_log_probs = get_response_log_probs(policy, input_ids, labels)
     old_log_probs = policy_log_probs.detach()
-    
-    # Compute reference log probs if reference model is provided
-    ref_log_probs = None
-    if ref_model is not None and kl_coef > 0.0:
-        with torch.no_grad():
-            ref_log_probs = get_response_log_probs(ref_model, input_ids, labels)
-    
     advantages = advantages_per_seq.unsqueeze(-1)
-    loss_per_token, metadata = compute_loss(advantages, policy_log_probs, old_log_probs, clip_range, 
-                                            ref_log_probs=ref_log_probs, kl_coef=kl_coef)
+    loss_per_token, metadata = compute_loss(advantages, policy_log_probs, old_log_probs, clip_range)
     if loss_type == "grpo":
         loss = masked_mean(loss_per_token, response_mask)
     elif loss_type == "dr_grpo":
@@ -625,7 +571,6 @@ def train(
     group_size: int, gradient_accumulation_steps: int, clip_range: float, use_std_normalization: bool,
     advantage_eps: float, device: str, eval_every: int = 5, writer: SummaryWriter = None, seed: int,
     loss_type: str = "grpo", max_completion_length: int = 256,
-    ref_model: PreTrainedModel = None, kl_coef: float = 0.0,
 ) -> None:
     n_prompts_per_rollout_batch = rollout_batch_size // group_size
     micro_train_batch_size = rollout_batch_size // gradient_accumulation_steps
@@ -650,26 +595,22 @@ def train(
         tokenized = tokenize_rollouts(rollout_input, rollout_response, tokenizer)
         optimizer.zero_grad()
         rollout_loss = 0.0
-        kl_penalty_total = 0.0
         for micro_idx in range(0, rollout_batch_size, micro_train_batch_size):
             s = slice(micro_idx, micro_idx + micro_train_batch_size)
-            loss, metadata = grpo_microbatch_step(
+            loss, _ = grpo_microbatch_step(
                 policy, tokenized["input_ids"][s].to(device), tokenized["labels"][s].to(device),
                 tokenized["response_mask"][s].to(device), advantages[s].to(device),
-                gradient_accumulation_steps, clip_range, loss_type=loss_type, max_completion_length=max_completion_length,
-                ref_model=ref_model, kl_coef=kl_coef
+                gradient_accumulation_steps, clip_range, loss_type=loss_type, max_completion_length=max_completion_length
             )
             rollout_loss += float(loss.item())
-            kl_penalty_total += float(metadata.get("kl_penalty_mean", 0.0))
         grad_norm = torch.nn.utils.clip_grad_norm_([p for p in policy.parameters() if p.grad is not None], 1.0)
         optimizer.step()
         scheduler.step()
         rollout_loss /= (rollout_batch_size / micro_train_batch_size)
-        kl_penalty_avg = kl_penalty_total / (rollout_batch_size / micro_train_batch_size)
         train_step += 1
         print(f"Step {train_step} | Loss: {rollout_loss:.4f} | Grad: {grad_norm:.4f} | "
               f"Reward mean: {reward_meta['mean']:.4f} | Reward std: {reward_meta['std']:.4f}")
-        log_train(rollout_loss, grad_norm, reward_meta, avg_output_tokens, writer, train_step, kl_penalty=kl_penalty_avg)
+        log_train(rollout_loss, grad_norm, reward_meta, avg_output_tokens, writer, train_step)
         if train_step % eval_every == 0:
             metrics = evaluate_model(llm, sampling_params, eval_prompts, eval_answers)
             log_eval(metrics, writer, train_step)
@@ -689,47 +630,18 @@ def main() -> None:
     model_id = "Qwen/Qwen3-1.7B"
     device = "cuda"
     seed, gpu_mem_util = 42, 0.4
-    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 200, 128, 8, 16
+    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 150, 128, 8, 32
     lr, clip_range, adv_eps = 7e-6, 0.2, 1e-6
-    temperature, min_tokens = 0.7, 4
+    temperature, min_tokens = 1.0, 4
     eval_every = 10
 
     # CHANGING HYPERPARAMETERS for main assignment
     loss_type = "grpo" # or "dr_grpo"
     max_tokens = 256 # or 512, 1024
     
-    # =========================================================================
-    # KL DIVERGENCE PARAMETERS
-    # =========================================================================
-    # KL divergence constrains how much the policy can deviate from a reference
-    # policy during training. This helps prevent catastrophic forgetting and
-    # maintains stability during RL fine-tuning.
-    #
-    # To enable KL divergence:
-    # 1. Set use_kl_penalty = True
-    # 2. Adjust kl_coef (higher values = stronger constraint)
-    #    - Start with 0.01 and tune based on your needs
-    #    - Too high: policy won't improve much
-    #    - Too low: minimal effect on training
-    # 3. The reference model is automatically created as a frozen copy of the
-    #    initial policy
-    # =========================================================================
-    use_kl_penalty = True  # Set to True to enable KL divergence penalty
-    kl_coef = 0.01  # Coefficient for KL penalty term (typical values: 0.001 - 0.1)
-    
     # Initialization
     use_std_norm = loss_type == "grpo"
     policy, tokenizer = init_policy(model_id=model_id, device=device)
-    
-    # Initialize reference model for KL divergence (if enabled)
-    ref_model = None
-    if use_kl_penalty:
-        ref_model, _ = init_policy(model_id=model_id, device=device)
-        ref_model.eval()  # Set reference model to eval mode
-        # Freeze reference model parameters
-        for param in ref_model.parameters():
-            param.requires_grad = False
-    
     llm = init_vllm(model_id=model_id, device=device, seed=seed, gpu_memory_utilization=gpu_mem_util)
     sampling_params = init_sampling_params(temperature=temperature, min_tokens=min_tokens, max_tokens=max_tokens)
     
@@ -772,8 +684,7 @@ def main() -> None:
         gradient_accumulation_steps=grad_acc_steps, clip_range=clip_range,
         use_std_normalization=use_std_norm, advantage_eps=adv_eps, device=device,
         eval_every=eval_every, writer=writer, seed=seed, loss_type=loss_type,
-        max_completion_length=max_tokens,
-        ref_model=ref_model, kl_coef=kl_coef if use_kl_penalty else 0.0
+        max_completion_length=max_tokens
     )
     
     # Save model
@@ -783,9 +694,69 @@ def main() -> None:
     tokenizer.save_pretrained(out_dir)
     print(f"Saved model and tokenizer to {out_dir}")
     writer.close()
+    
+# Test Function
+def test_functions():
+    """Quick unit tests for the implemented functions"""
+    print("\n=== Running Quick Tests ===")
+    
+    # Test masked_mean
+    print("Testing masked_mean...")
+    tensor = torch.randn(4, 10)  # [batch_size=4, seq_len=10]
+    mask = torch.tensor([
+        [False, False, True, True, True, True, False, False, False, False],
+        [False, True, True, True, True, False, False, False, False, False],
+        [False, False, False, True, True, True, True, True, False, False],
+        [False, False, True, True, True, True, True, False, False, False],
+    ])
+    result = masked_mean(tensor, mask)
+    assert result.shape == torch.Size([]), f"Expected scalar, got shape {result.shape}"
+    print(f"✅ masked_mean works! Result: {result.item():.4f}")
+    
+    # Test masked_mean_drgrpo
+    print("Testing masked_mean_drgrpo...")
+    result = masked_mean_drgrpo(tensor, mask, num_tokens=256)
+    assert result.shape == torch.Size([]), f"Expected scalar, got shape {result.shape}"
+    print(f"✅ masked_mean_drgrpo works! Result: {result.item():.4f}")
+    
+    # Test compute_loss
+    print("Testing compute_loss...")
+    advantages = torch.randn(4)  # [batch_size=4]
+    advantages = advantages.unsqueeze(-1)  # ✅ ADD THIS LINE - simulate grpo_microbatch_step
+    policy_log_probs = torch.randn(4, 10)  # [batch_size=4, seq_len=10]
+    old_log_probs = torch.randn(4, 10)
+    clip_range = 0.2
+    
+    loss_per_token, stats = compute_loss(advantages, policy_log_probs, old_log_probs, clip_range)
+    assert loss_per_token.shape == (4, 10), f"Expected shape (4, 10), got {loss_per_token.shape}"
+    assert "ratio_mean" in stats, "Missing ratio_mean in stats"
+    print(f"✅ compute_loss works! Loss shape: {loss_per_token.shape}")
+    
+    # Test compute_group_normalized_advantages
+    print("Testing compute_group_normalized_advantages...")
+    rollout_responses = ["resp1", "resp2", "resp3", "resp4"]
+    ground_truths = [
+        {"target": 36, "numbers": [79, 17, 60]},
+        {"target": 36, "numbers": [79, 17, 60]},
+        {"target": 36, "numbers": [79, 17, 60]},
+        {"target": 36, "numbers": [79, 17, 60]},
+    ]
+    
+    advantages, raw_rewards, metadata = compute_group_normalized_advantages(
+        rollout_responses, ground_truths, reward_fn, group_size=2, 
+        advantage_eps=1e-6, normalize_by_std=True
+    )
+    assert advantages.shape == (4,), f"Expected shape (4,), got {advantages.shape}"
+    assert raw_rewards.shape == (4,), f"Expected shape (4,), got {raw_rewards.shape}"
+    assert "mean" in metadata and "std" in metadata, "Missing metadata keys"
+    print(f"✅ compute_group_normalized_advantages works!")
+    
+    print("\n=== All Tests Passed! ===\n")
 
 
 if __name__ == "__main__":
+    # Run quick tests first
+    test_functions()
     
     # Then run main training
     main()
