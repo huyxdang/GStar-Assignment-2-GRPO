@@ -386,7 +386,7 @@ def log_train(rollout_batch_loss: float, grad_norm: float, reward_metadata: Dict
     writer.add_scalar("train/avg_output_tokens", float(avg_output_tokens), global_step=step)
     print(
         f"Step {step} | "
-        f"Loss: {rollout_loss:.4f} | "
+        f"Loss: {rollout_batch_loss:.8f} | "
         f"Grad norm: {grad_norm:.4f} | "
         f"Reward mean: {float(reward_metadata['mean']):.4f} | "
         f"Reward std: {float(reward_metadata['std']):.4f} | "
