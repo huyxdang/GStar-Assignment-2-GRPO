@@ -34,6 +34,7 @@ from datasets import load_dataset
 from torch.utils.tensorboard import SummaryWriter
 import re
 from dotenv import load_dotenv
+from dataclasses import dataclass
 load_dotenv()
 
 logging.getLogger("vllm.engine.scheduler").setLevel(logging.ERROR)
@@ -565,10 +566,10 @@ def main_enhanced():
     model_id = "Qwen/Qwen3-1.7B"
     device = "cuda"
     seed, gpu_mem_util = 42, 0.4
-    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 150, 128, 8, 32
+    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 10, 128, 8, 32 ###################### 100
     lr, clip_range, adv_eps = 7e-6, 0.2, 1e-6
     temperature, min_tokens = 1.0, 4
-    eval_every = 10
+    eval_every = 2 ################# supposed to be 10
     
     # NEW PARAMETERS
     kl_coef = 0.05  # KL penalty coefficient (tune this: 0.01-0.1)
@@ -1097,64 +1098,577 @@ def main() -> None:
     print(f"Saved model and tokenizer to {out_dir}")
     writer.close()
     
-# Test Function
-def test_functions():
-    """Quick unit tests for the implemented functions"""
-    print("\n=== Running Quick Tests ===")
+
+
+# Enhanced reward function with dense rewards
+def reward_fn_dense(generated_text: str, ground_truth: Dict, scale_factor: float = 5.0) -> float:
+    """
+    Dense reward function that provides more granular feedback.
     
-    # Test masked_mean
-    print("Testing masked_mean...")
-    tensor = torch.randn(4, 10)  # [batch_size=4, seq_len=10]
-    mask = torch.tensor([
-        [False, False, True, True, True, True, False, False, False, False],
-        [False, True, True, True, True, False, False, False, False, False],
-        [False, False, False, True, True, True, True, True, False, False],
-        [False, False, True, True, True, True, True, False, False, False],
-    ])
-    result = masked_mean(tensor, mask)
-    assert result.shape == torch.Size([]), f"Expected scalar, got shape {result.shape}"
-    print(f"✅ masked_mean works! Result: {result.item():.4f}")
+    Scoring:
+    - 1.0: Perfect answer
+    - 0.7: Correct numbers, valid equation, but wrong result (close attempt)
+    - 0.5: Correct numbers but invalid equation
+    - 0.3: Has answer tag, uses some correct numbers
+    - 0.1: Has answer tag but completely wrong
+    - 0.0: No answer tag
+    """
+    target = ground_truth.get("target")
+    available_numbers = ground_truth.get("numbers", [])
     
-    # Test masked_mean_drgrpo
-    print("Testing masked_mean_drgrpo...")
-    result = masked_mean_drgrpo(tensor, mask, num_tokens=256)
-    assert result.shape == torch.Size([]), f"Expected scalar, got shape {result.shape}"
-    print(f"✅ masked_mean_drgrpo works! Result: {result.item():.4f}")
+    equation = _extract_answer(generated_text)
+    if equation is None:
+        return 0.0
     
-    # Test compute_loss
-    print("Testing compute_loss...")
-    advantages = torch.randn(4)  # [batch_size=4]
-    advantages = advantages.unsqueeze(-1)  # ✅ ADD THIS LINE - simulate grpo_microbatch_step
-    policy_log_probs = torch.randn(4, 10)  # [batch_size=4, seq_len=10]
-    old_log_probs = torch.randn(4, 10)
-    clip_range = 0.2
+    numbers_valid = _validate_numbers(equation, available_numbers)
+    result = _evaluate_equation(equation)
     
-    loss_per_token, stats = compute_loss(advantages, policy_log_probs, old_log_probs, clip_range)
-    assert loss_per_token.shape == (4, 10), f"Expected shape (4, 10), got {loss_per_token.shape}"
-    assert "ratio_mean" in stats, "Missing ratio_mean in stats"
-    print(f"✅ compute_loss works! Loss shape: {loss_per_token.shape}")
+    # Dense reward structure
+    if result is not None and numbers_valid:
+        if abs(result - target) < 1e-6:
+            return 1.0  # Perfect
+        else:
+            # Reward based on distance from target
+            distance = abs(result - target)
+            max_distance = abs(target) + 100  # Normalization factor
+            proximity_reward = max(0.0, 1.0 - (distance / max_distance))
+            return 0.5 + 0.3 * proximity_reward  # 0.5 to 0.8 range
     
-    # Test compute_group_normalized_advantages
-    print("Testing compute_group_normalized_advantages...")
-    rollout_responses = ["resp1", "resp2", "resp3", "resp4"]
-    ground_truths = [
-        {"target": 36, "numbers": [79, 17, 60]},
-        {"target": 36, "numbers": [79, 17, 60]},
-        {"target": 36, "numbers": [79, 17, 60]},
-        {"target": 36, "numbers": [79, 17, 60]},
-    ]
+    if numbers_valid and result is None:
+        return 0.5  # Correct numbers, invalid equation
     
-    advantages, raw_rewards, metadata = compute_group_normalized_advantages(
-        rollout_responses, ground_truths, reward_fn, group_size=2, 
-        advantage_eps=1e-6, normalize_by_std=True
+    if not numbers_valid:
+        # Check partial number usage
+        try:
+            found_numbers = list(map(int, re.findall(r"\d+", equation)))
+            overlap = len(set(found_numbers) & set(available_numbers))
+            if overlap > 0:
+                return 0.2 + 0.1 * (overlap / len(available_numbers))
+        except:
+            pass
+    
+    return 0.1  # Has answer tag but wrong
+
+
+# Curriculum learning with stages
+from dataclasses import dataclass
+
+@dataclass
+class CurriculumStage:
+    """Defines a stage in the curriculum."""
+    name: str
+    min_numbers: int  # Minimum numbers in problem
+    max_numbers: int  # Maximum numbers in problem
+    target_range: Tuple[int, int]  # (min_target, max_target)
+    duration_steps: int  # How many steps to stay in this stage
+    success_threshold: float = 0.7  # Accuracy needed to advance
+
+
+class CurriculumScheduler:
+    """
+    Manages curriculum learning progression.
+    Starts with easy problems (few numbers, small targets)
+    Gradually increases difficulty based on performance.
+    """
+    def __init__(self, stages: List[CurriculumStage]):
+        self.stages = stages
+        self.current_stage_idx = 0
+        self.steps_in_stage = 0
+        self.stage_accuracies = []
+        
+    def get_current_stage(self) -> CurriculumStage:
+        return self.stages[self.current_stage_idx]
+    
+    def filter_dataset(self, dataset: List[Dict]) -> List[Dict]:
+        """Filter dataset based on current curriculum stage."""
+        stage = self.get_current_stage()
+        filtered = []
+        
+        for example in dataset:
+            nums = example["answer"]["numbers"]
+            target = example["answer"]["target"]
+            
+            # Check if example matches current stage criteria
+            if (stage.min_numbers <= len(nums) <= stage.max_numbers and
+                stage.target_range[0] <= abs(target) <= stage.target_range[1]):
+                filtered.append(example)
+        
+        return filtered
+    
+    def should_advance(self, current_accuracy: float) -> bool:
+        """Check if we should advance to next stage."""
+        stage = self.get_current_stage()
+        self.stage_accuracies.append(current_accuracy)
+        self.steps_in_stage += 1
+        
+        # Need minimum duration AND sufficient accuracy
+        if self.steps_in_stage < stage.duration_steps:
+            return False
+        
+        # Check recent performance (last 5 evaluations)
+        recent_acc = self.stage_accuracies[-5:] if len(self.stage_accuracies) >= 5 else self.stage_accuracies
+        avg_acc = sum(recent_acc) / len(recent_acc)
+        
+        return avg_acc >= stage.success_threshold
+    
+    def advance(self) -> bool:
+        """Advance to next stage. Returns True if advanced, False if at final stage."""
+        if self.current_stage_idx < len(self.stages) - 1:
+            self.current_stage_idx += 1
+            self.steps_in_stage = 0
+            self.stage_accuracies = []
+            stage = self.get_current_stage()
+            print(f"\n🎓 ADVANCING TO CURRICULUM STAGE {self.current_stage_idx + 1}: {stage.name}")
+            print(f"   Numbers: {stage.min_numbers}-{stage.max_numbers}, "
+                  f"Targets: {stage.target_range[0]}-{stage.target_range[1]}")
+            return True
+        return False
+    
+    def get_progress(self) -> str:
+        """Get human-readable progress string."""
+        stage = self.get_current_stage()
+        avg_acc = sum(self.stage_accuracies[-5:]) / len(self.stage_accuracies[-5:]) if self.stage_accuracies else 0.0
+        return (f"Stage {self.current_stage_idx + 1}/{len(self.stages)}: {stage.name} "
+                f"(Step {self.steps_in_stage}/{stage.duration_steps}, Avg Acc: {avg_acc:.1%})")
+
+
+# KL divergence computation
+def compute_kl_penalty(
+    policy_log_probs: torch.Tensor,
+    ref_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    kl_coef: float = 0.1
+) -> torch.Tensor:
+    """
+    Compute KL divergence penalty between policy and reference model.
+    KL(π || π_ref) = log(π) - log(π_ref)
+    """
+    kl_div = policy_log_probs - ref_log_probs
+    # Mask and average
+    kl_div_masked = kl_div * response_mask.float()
+    kl_penalty = kl_div_masked.sum(dim=1) / response_mask.float().sum(dim=1).clamp(min=1)
+    return kl_coef * kl_penalty.mean()
+
+
+# Modified training step with KL penalty
+def grpo_microbatch_step_with_kl(
+    policy: PreTrainedModel,
+    ref_model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    response_mask: torch.Tensor,
+    advantages_per_seq: torch.Tensor,
+    gradient_accumulation_steps: int,
+    clip_range: float,
+    kl_coef: float = 0.1,
+    loss_type: str = "grpo",
+    max_completion_length: int = 512,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Modified step with KL penalty"""
+    
+    # Policy forward pass
+    policy_log_probs = get_response_log_probs(policy, input_ids, labels)
+    
+    # Reference model forward pass (no grad)
+    with torch.no_grad():
+        ref_log_probs = get_response_log_probs(ref_model, input_ids, labels)
+    
+    # Compute GRPO loss
+    old_log_probs = policy_log_probs.detach()
+    advantages = advantages_per_seq.unsqueeze(-1)
+    loss_per_token, metadata = compute_loss(advantages, policy_log_probs, old_log_probs, clip_range)
+    
+    if loss_type == "grpo":
+        grpo_loss = masked_mean(loss_per_token, response_mask)
+    elif loss_type == "dr_grpo":
+        grpo_loss = masked_mean_drgrpo(loss_per_token, response_mask, max_completion_length)
+    else:
+        raise ValueError(f"Unknown loss type: {loss_type}")
+    
+    # Compute KL penalty
+    kl_penalty = compute_kl_penalty(policy_log_probs, ref_log_probs, response_mask, kl_coef)
+    
+    # Combined loss
+    total_loss = (grpo_loss + kl_penalty) / gradient_accumulation_steps
+    total_loss.backward()
+    
+    # Add KL to metadata
+    metadata["kl_penalty"] = kl_penalty.detach()
+    metadata["grpo_loss"] = grpo_loss.detach()
+    
+    return total_loss.detach(), metadata
+
+
+# Modified main training loop
+def train_enhanced(
+    policy: PreTrainedModel,
+    ref_model: PreTrainedModel,
+    tokenizer: AutoTokenizer,
+    llm: LLM,
+    sampling_params: SamplingParams,
+    train_examples: List[Dict],
+    eval_prompts: List[str],
+    eval_answers: List[Dict],
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+    n_grpo_steps: int,
+    rollout_batch_size: int,
+    group_size: int,
+    gradient_accumulation_steps: int,
+    clip_range: float,
+    use_std_normalization: bool,
+    advantage_eps: float,
+    device: str,
+    eval_every: int = 5,
+    writer: SummaryWriter = None,
+    seed: int = 42,
+    loss_type: str = "grpo",
+    max_completion_length: int = 256,
+    kl_coef: float = 0.1,
+    use_dense_rewards: bool = True,
+    use_curriculum: bool = True,
+    curriculum_type: str = "default",
+    adaptive_kl: bool = False,  # NEW: Enable adaptive KL adjustment
+    early_stopping_patience: int = 0,  # NEW: 0 = disabled, >0 = enabled
+) -> None:
+    """Enhanced training with KL, curriculum, and dense rewards"""
+    
+    n_prompts_per_rollout_batch = rollout_batch_size // group_size
+    micro_train_batch_size = rollout_batch_size // gradient_accumulation_steps
+    random.seed(seed)
+    train_step = 0
+    
+    # Initialize curriculum if enabled
+    curriculum_scheduler = None
+    if use_curriculum:
+        # Choose curriculum type
+        if curriculum_type == "default":
+            stages = create_default_curriculum()
+        elif curriculum_type == "aggressive":
+            stages = create_aggressive_curriculum()
+        elif curriculum_type == "gentle":
+            stages = create_gentle_curriculum()
+        else:
+            raise ValueError(f"Unknown curriculum_type: {curriculum_type}")
+        
+        curriculum_scheduler = CurriculumScheduler(stages)
+        initial_pool = curriculum_scheduler.filter_dataset(train_examples)
+        print(f"📚 Curriculum initialized ({curriculum_type}): {curriculum_scheduler.get_progress()}")
+        print(f"   Starting with {len(initial_pool)} examples")
+    
+    # Choose reward function
+    reward_function = reward_fn_dense if use_dense_rewards else reward_fn
+    
+    # Initialize adaptive KL if enabled
+    kl_controller = AdaptiveKLController(initial_kl=kl_coef) if adaptive_kl else None
+    if adaptive_kl:
+        print(f"🎛️  Adaptive KL enabled (initial={kl_coef:.4f}, target=0.02)")
+    
+    # Initialize early stopping if enabled
+    early_stopper = EarlyStopping(patience=early_stopping_patience) if early_stopping_patience > 0 else None
+    if early_stopping_patience > 0:
+        print(f"🛑 Early stopping enabled (patience={early_stopping_patience})")
+    
+    # Initial evaluation
+    metrics = evaluate_model(llm, sampling_params, eval_prompts, eval_answers)
+    if writer:
+        for k in ["accuracy", "mean_reward", "std_reward", "avg_output_tokens"]:
+            writer.add_scalar(f"eval/{k}", metrics[k], global_step=train_step)
+        log_eval(metrics, writer, train_step)
+    
+    for step_idx in range(n_grpo_steps):
+        # Get current training pool (curriculum)
+        if use_curriculum:
+            current_pool = curriculum_scheduler.filter_dataset(train_examples)
+            if len(current_pool) < n_prompts_per_rollout_batch:
+                print(f"⚠️  Warning: Only {len(current_pool)} examples in current stage, "
+                      f"need {n_prompts_per_rollout_batch}. Sampling with replacement.")
+                sampled = random.choices(current_pool, k=n_prompts_per_rollout_batch)
+            else:
+                sampled = random.sample(current_pool, n_prompts_per_rollout_batch)
+        else:
+            sampled = random.sample(train_examples, n_prompts_per_rollout_batch)
+        
+        prompts_batch = [ex["prompt"] for ex in sampled]
+        answers_batch = [ex["answer"] for ex in sampled]
+        
+        # Rollout
+        rollout_input, rollout_response, rollout_tokens = rollout_with_vllm(
+            policy, llm, sampling_params, prompts_batch, group_size
+        )
+        answers_dup = duplicate_data(answers_batch, group_size)
+        avg_output_tokens = sum(rollout_tokens) / len(rollout_tokens) if rollout_tokens else 0.0
+        
+        # Compute advantages with chosen reward function
+        advantages, _, reward_meta = compute_group_normalized_advantages(
+            rollout_response, answers_dup, reward_function, group_size, advantage_eps, use_std_normalization
+        )
+        
+        # Tokenize
+        tokenized = tokenize_rollouts(rollout_input, rollout_response, tokenizer)
+        
+        # Get current KL coefficient
+        current_kl_coef = kl_coef if not adaptive_kl else kl_controller.kl_coef
+        
+        # Training step with KL
+        optimizer.zero_grad()
+        rollout_loss = 0.0
+        total_kl = 0.0
+        
+        for micro_idx in range(0, rollout_batch_size, micro_train_batch_size):
+            s = slice(micro_idx, micro_idx + micro_train_batch_size)
+            loss, metadata = grpo_microbatch_step_with_kl(
+                policy, ref_model,
+                tokenized["input_ids"][s].to(device),
+                tokenized["labels"][s].to(device),
+                tokenized["response_mask"][s].to(device),
+                advantages[s].to(device),
+                gradient_accumulation_steps,
+                clip_range,
+                kl_coef=current_kl_coef,
+                loss_type=loss_type,
+                max_completion_length=max_completion_length
+            )
+            rollout_loss += float(loss.item())
+            total_kl += float(metadata["kl_penalty"].item())
+        
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            [p for p in policy.parameters() if p.grad is not None], 1.0
+        )
+        optimizer.step()
+        scheduler.step()
+        
+        rollout_loss /= (rollout_batch_size / micro_train_batch_size)
+        total_kl /= (rollout_batch_size / micro_train_batch_size)
+        train_step += 1
+        
+        # Update adaptive KL controller
+        if adaptive_kl:
+            kl_controller.update(total_kl)
+        
+        # Logging
+        print(f"Step {train_step} | {curriculum_scheduler.get_progress() if use_curriculum else ''}")
+        print(f"   Loss: {rollout_loss:.4f} | KL: {total_kl:.4f} | Grad: {grad_norm:.4f} | Reward: {reward_meta['mean']:.4f}")
+        
+        if writer:
+            writer.add_scalar("train/loss", rollout_loss, train_step)
+            writer.add_scalar("train/kl_penalty", total_kl, train_step)
+            writer.add_scalar("train/grad_norm", grad_norm, train_step)
+            writer.add_scalar("train/reward_mean", reward_meta["mean"], train_step)
+            writer.add_scalar("train/avg_output_tokens", avg_output_tokens, train_step)
+            if adaptive_kl:
+                writer.add_scalar("train/kl_coefficient", kl_controller.kl_coef, train_step)
+            if use_curriculum:
+                writer.add_scalar("curriculum/stage", curriculum_scheduler.current_stage_idx, train_step)
+                writer.add_scalar("curriculum/steps_in_stage", curriculum_scheduler.steps_in_stage, train_step)
+        
+        # Evaluation
+        if train_step % eval_every == 0:
+            metrics = evaluate_model(llm, sampling_params, eval_prompts, eval_answers)
+            log_eval(metrics, writer, train_step)
+            
+            if writer:
+                for k in ["accuracy", "mean_reward", "std_reward", "avg_output_tokens"]:
+                    writer.add_scalar(f"eval/{k}", metrics[k], train_step)
+            
+            # Check early stopping
+            if early_stopper and early_stopper.check(metrics["accuracy"]):
+                print(f"\n🏁 Training stopped early at step {train_step}")
+                break
+            
+            # Curriculum progression
+            if use_curriculum:
+                accuracy_decimal = metrics["accuracy"] / 100.0
+                if curriculum_scheduler.should_advance(accuracy_decimal):
+                    curriculum_scheduler.advance()
+
+
+# Updated main function
+def main_enhanced():
+    """
+    Main function with all enhancements for stable RL training.
+    
+    === CONFIGURATION GUIDE ===
+    
+    🎯 FOR STABLE TRAINING (Recommended Starting Point):
+        - kl_coef = 0.05
+        - adaptive_kl = True
+        - use_dense_rewards = True
+        - curriculum_type = "default"
+        - loss_type = "grpo"
+    
+    ⚡ FOR FASTER LEARNING (If model learns quickly):
+        - kl_coef = 0.02
+        - adaptive_kl = False
+        - curriculum_type = "aggressive"
+        - increase learning rate to 1e-5
+    
+    🐢 FOR VERY STABLE BUT SLOWER (If training is unstable):
+        - kl_coef = 0.1
+        - adaptive_kl = True
+        - curriculum_type = "gentle"
+        - reduce learning rate to 5e-6
+    
+    🔬 FOR ABLATION STUDIES:
+        - Set use_dense_rewards = False to test sparse rewards
+        - Set use_curriculum = False to test without curriculum
+        - Set adaptive_kl = False with fixed kl_coef
+    
+    📊 MONITORING:
+        - Watch train/kl_penalty: should be 0.01-0.05 (higher = more constraint)
+        - Watch train/reward_mean: should increase over time
+        - Watch curriculum/stage: should advance as model improves
+        - Watch eval/accuracy: target 60%+ by end of training
+    """
+    
+    # Hyperparameters
+    model_id = "Qwen/Qwen3-1.7B"
+    device = "cuda"
+    seed, gpu_mem_util = 42, 0.4
+    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 150, 128, 8, 32
+    lr, clip_range, adv_eps = 7e-6, 0.2, 1e-6
+    temperature, min_tokens = 1.0, 4
+    eval_every = 10
+    
+    # NEW PARAMETERS
+    kl_coef = 0.05  # KL penalty coefficient (tune: 0.01-0.1)
+    adaptive_kl = True  # Automatically adjust KL coefficient
+    use_dense_rewards = True  # Enable dense rewards
+    use_curriculum = True  # Enable curriculum learning
+    curriculum_type = "default"  # "default", "aggressive", or "gentle"
+    early_stopping_patience = 8  # Stop if no improvement for N evals (0=disabled)
+    loss_type = "grpo"
+    max_tokens = 256
+    
+    # Initialize models
+    use_std_norm = loss_type == "grpo"
+    policy, tokenizer = init_policy(model_id=model_id, device=device)
+    
+    # Create reference model (frozen copy)
+    ref_model, _ = init_policy(model_id=model_id, device=device)
+    ref_model.eval()
+    for param in ref_model.parameters():
+        param.requires_grad = False
+    print("✅ Reference model created and frozen")
+    
+    llm = init_vllm(model_id=model_id, device=device, seed=seed, gpu_memory_utilization=gpu_mem_util)
+    sampling_params = init_sampling_params(temperature=temperature, min_tokens=min_tokens, max_tokens=max_tokens)
+    
+    # Dataset
+    def build_dataset(split):
+        data = []
+        for ex in split:
+            prompt = TEMPLATE.format(numbers=ex["nums"], target=ex["target"], max_tokens=max_tokens)
+            prompt = tokenizer.apply_chat_template(
+                [dict(role="system", content="You are a helpful assistant."),
+                 dict(role="user", content=prompt)],
+                add_generation_prompt=True, tokenize=False
+            )
+            data.append({
+                "prompt": prompt,
+                "answer": {"target": ex["target"], "numbers": ex["nums"]},
+            })
+        return data
+    
+    train_data = load_dataset("justinphan3110/Countdown-Tasks-3to4", split="train")
+    eval_data = load_dataset("justinphan3110/Countdown-Tasks-3to4", split="test")
+    
+    train_examples = build_dataset(train_data)
+    eval_examples = build_dataset(eval_data)
+    
+    # Optimizer
+    optimizer = torch.optim.AdamW(policy.parameters(), lr=lr, weight_decay=1e-2, betas=(0.9, 0.95))
+    scheduler = get_constant_schedule_with_warmup(optimizer=optimizer, num_warmup_steps=10)
+    
+    # Logging
+    timestamp = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    log_dir = os.path.join("./output", "tb", f"enhanced_{loss_type}", str(timestamp))
+    os.makedirs(log_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir=log_dir)
+    
+    print(f"\n🚀 Starting Enhanced Training:")
+    print(f"   - KL Coefficient: {kl_coef} (adaptive={adaptive_kl})")
+    print(f"   - Dense Rewards: {use_dense_rewards}")
+    print(f"   - Curriculum: {use_curriculum} ({curriculum_type})")
+    print(f"   - Early Stopping: {'Enabled' if early_stopping_patience > 0 else 'Disabled'}")
+    print(f"   - Loss Type: {loss_type}")
+    print(f"   - Max Tokens: {max_tokens}")
+    
+    # Training
+    train_enhanced(
+        policy=policy,
+        ref_model=ref_model,
+        tokenizer=tokenizer,
+        llm=llm,
+        sampling_params=sampling_params,
+        train_examples=train_examples,
+        eval_prompts=[ex["prompt"] for ex in eval_examples],
+        eval_answers=[ex["answer"] for ex in eval_examples],
+        optimizer=optimizer,
+        scheduler=scheduler,
+        n_grpo_steps=n_grpo_steps,
+        rollout_batch_size=rollout_batch_size,
+        group_size=group_size,
+        gradient_accumulation_steps=grad_acc_steps,
+        clip_range=clip_range,
+        use_std_normalization=use_std_norm,
+        advantage_eps=adv_eps,
+        device=device,
+        eval_every=eval_every,
+        writer=writer,
+        seed=seed,
+        loss_type=loss_type,
+        max_completion_length=max_tokens,
+        kl_coef=kl_coef,
+        use_dense_rewards=use_dense_rewards,
+        use_curriculum=use_curriculum,
+        curriculum_type=curriculum_type,
+        adaptive_kl=adaptive_kl,
+        early_stopping_patience=early_stopping_patience,
     )
-    assert advantages.shape == (4,), f"Expected shape (4,), got {advantages.shape}"
-    assert raw_rewards.shape == (4,), f"Expected shape (4,), got {raw_rewards.shape}"
-    assert "mean" in metadata and "std" in metadata, "Missing metadata keys"
-    print(f"✅ compute_group_normalized_advantages works!")
     
-    print("\n=== All Tests Passed! ===\n")
+    # Save
+    out_dir = os.path.join("./output", f"enhanced_model_{timestamp}")
+    os.makedirs(out_dir, exist_ok=True)
+    policy.save_pretrained(out_dir)
+    tokenizer.save_pretrained(out_dir)
+    print(f"✅ Saved model to {out_dir}")
+    writer.close()
 
 
 if __name__ == "__main__":
+    """
+    === QUICK START GUIDE ===
+    
+    1. STABLE TRAINING (Recommended):
+       Just run: main_enhanced()
+       
+    2. FAST TRAINING (Risky):
+       Edit main_enhanced():
+         - kl_coef = 0.02
+         - curriculum_type = "aggressive"
+         - early_stopping_patience = 5
+    
+    3. ULTRA-STABLE (Slow):
+       Edit main_enhanced():
+         - kl_coef = 0.1
+         - curriculum_type = "gentle"
+         - lr = 5e-6
+    
+    4. ABLATION - No Enhancements:
+       Edit main_enhanced():
+         - use_dense_rewards = False
+         - use_curriculum = False
+         - adaptive_kl = False
+         - kl_coef = 0.0
+    
+    === TENSORBOARD ===
+    Run: tensorboard --logdir=./output/tb
+    Key metrics to watch:
+      - train/loss (should decrease)
+      - train/kl_penalty (should be 0.01-0.05)
+      - train/reward_mean (should increase)
+      - eval/accuracy (target 60%+)
+      - curriculum/stage (should advance)
+    """
     main_enhanced()
