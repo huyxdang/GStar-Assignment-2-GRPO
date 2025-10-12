@@ -591,10 +591,10 @@ def main() -> None:
     model_id = "output/best_phase_3"  # Load local model from Phase 3
     device = "cuda"
     seed, gpu_mem_util = 42, 0.6
-    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 80, 128, 4, 8
-    lr, clip_range, adv_eps = 1e-5, 0.15, 1e-6
-    temperature, min_tokens = 0.9, 4
-    eval_every = 10
+    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 80, 128, 8, 16
+    lr, clip_range, adv_eps = 7e-6, 0.2, 1e-6
+    temperature, min_tokens = 1.1, 4
+    eval_every = 5
 
     # CHANGING HYPERPARAMETERS for main assignment
     loss_type = "grpo" # or "dr_grpo"
@@ -626,7 +626,7 @@ def main() -> None:
     eval_examples = build_dataset(eval_data)
     
     # Optimizer and Scheduler
-    optimizer = torch.optim.AdamW(policy.parameters(), lr=lr, weight_decay=1e-2, betas=(0.9, 0.95))
+    optimizer = torch.optim.AdamW(policy.parameters(), lr=lr, weight_decay=1e-3, betas=(0.9, 0.95))
     scheduler = get_constant_schedule_with_warmup(optimizer=optimizer, num_warmup_steps=0)
     
     # Logging
