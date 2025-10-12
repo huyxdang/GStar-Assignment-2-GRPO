@@ -577,7 +577,7 @@ def train(
     return best_accuracy
 
 
-def init_policy(model_id:    model_id = "Qwen/Qwen3-1.7B" str, device: str) -> Tuple[PreTrainedModel, AutoTokenizer]:
+def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokenizer]:
     model = AutoModelForCausalLM.from_pretrained(
         model_id, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", use_cache=False
     )
