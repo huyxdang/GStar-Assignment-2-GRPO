@@ -642,8 +642,7 @@ def main() -> None:
     best_accuracy = train(
         policy=policy, tokenizer=tokenizer, llm=llm, sampling_params=sampling_params,
         train_prompts=[ex["prompt"] for ex in train_examples], train_answers=[ex["answer"] for ex in train_examples],
-        eval_prompts=[ex["prompt"] for ex i
-        n eval_examples], eval_answers=[ex["answer"] for ex in eval_examples],
+        eval_prompts=[ex["prompt"] for ex in eval_examples], eval_answers=[ex["answer"] for ex in eval_examples],
         optimizer=optimizer, scheduler=scheduler, n_grpo_steps=n_grpo_steps,
         rollout_batch_size=rollout_batch_size, group_size=group_size,
         gradient_accumulation_steps=grad_acc_steps, clip_range=clip_range,
