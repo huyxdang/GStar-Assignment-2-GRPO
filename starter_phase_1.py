@@ -636,7 +636,7 @@ def main() -> None:
     writer = SummaryWriter(log_dir=log_dir)
     
     # Best model directory
-    best_model_dir = os.path.join("./output", f"hw_a2_best_model_{timestamp}")
+    best_model_dir = "output/starter_phase_1_512"
     
     # Training
     best_accuracy = train(

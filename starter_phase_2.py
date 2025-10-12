@@ -588,7 +588,7 @@ def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokeni
 
 def main() -> None:
     # Hyperparameters
-    model_id = "output/best_phase_1_512"  # Load local model from Phase 1
+    model_id = "output/starter_phase_1_512"  # Load local model from Phase 1
     device = "cuda"
     seed, gpu_mem_util = 42, 0.6
     n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 80, 128, 8, 16
@@ -636,7 +636,7 @@ def main() -> None:
     writer = SummaryWriter(log_dir=log_dir)
     
     # Best model directory
-    best_model_dir = os.path.join("./output", f"hw_a2_best_model_{timestamp}")
+    best_model_dir = "output/starter_phase_2_512"
     
     # Training
     best_accuracy = train(
