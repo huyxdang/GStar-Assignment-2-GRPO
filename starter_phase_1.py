@@ -588,7 +588,7 @@ def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokeni
 
 def main() -> None:
     # Hyperparameters
-    model_id = "Qwen/Qwen3-1.7B",
+    model_id = "Qwen/Qwen3-1.7B"
     device = "cuda"
     seed, gpu_mem_util = 42, 0.6
     n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 150, 128, 8, 16
