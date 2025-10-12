@@ -1,3 +1,4 @@
+# Phase 4
 import os
 import datetime
 import random
@@ -588,7 +589,7 @@ def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokeni
 
 def main() -> None:
     # Hyperparameters
-    model_id = "output/best_phase_3_512"  # Load local model from Phase 3
+    model_id = "best_phase_3"  # Load local model from Phase 3
     device = "cuda"
     seed, gpu_mem_util = 42, 0.6
     n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 80, 128, 8, 16
@@ -598,7 +599,7 @@ def main() -> None:
 
     # CHANGING HYPERPARAMETERS for main assignment
     loss_type = "grpo" # or "dr_grpo"
-    max_tokens = 512 # or 512, 1024
+    max_tokens = 256 # or 512, 1024
     
     # Initialization
     use_std_norm = loss_type == "grpo"

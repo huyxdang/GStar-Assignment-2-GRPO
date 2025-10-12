@@ -588,17 +588,17 @@ def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokeni
 
 def main() -> None:
     # Hyperparameters
-    model_id = "output/best_phase_1"  # Load local model from Phase 1
+    model_id = "output/best_phase_1_512"  # Load local model from Phase 1
     device = "cuda"
     seed, gpu_mem_util = 42, 0.6
-    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 150, 128, 8, 16
-    lr, clip_range, adv_eps = 5e-6, 0.15, 1e-4
+    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 80, 128, 8, 16
+    lr, clip_range, adv_eps = 2e-6, 0.15, 1e-4
     temperature, min_tokens = 0.8, 4
     eval_every = 10
 
     # CHANGING HYPERPARAMETERS for main assignment
     loss_type = "grpo" # or "dr_grpo"
-    max_tokens = 256 # or 512, 1024
+    max_tokens = 512 # or 512, 1024
     
     # Initialization
     use_std_norm = loss_type == "grpo"
@@ -626,7 +626,7 @@ def main() -> None:
     eval_examples = build_dataset(eval_data)
     
     # Optimizer and Scheduler
-    optimizer = torch.optim.AdamW(policy.parameters(), lr=lr, weight_decay=1e-3, betas=(0.9, 0.95))
+    optimizer = torch.optim.AdamW(policy.parameters(), lr=lr, weight_decay=1e-2, betas=(0.9, 0.95))
     scheduler = get_constant_schedule_with_warmup(optimizer=optimizer, num_warmup_steps=0)
     
     # Logging
@@ -642,7 +642,8 @@ def main() -> None:
     best_accuracy = train(
         policy=policy, tokenizer=tokenizer, llm=llm, sampling_params=sampling_params,
         train_prompts=[ex["prompt"] for ex in train_examples], train_answers=[ex["answer"] for ex in train_examples],
-        eval_prompts=[ex["prompt"] for ex in eval_examples], eval_answers=[ex["answer"] for ex in eval_examples],
+        eval_prompts=[ex["prompt"] for ex i
+        n eval_examples], eval_answers=[ex["answer"] for ex in eval_examples],
         optimizer=optimizer, scheduler=scheduler, n_grpo_steps=n_grpo_steps,
         rollout_batch_size=rollout_batch_size, group_size=group_size,
         gradient_accumulation_steps=grad_acc_steps, clip_range=clip_range,

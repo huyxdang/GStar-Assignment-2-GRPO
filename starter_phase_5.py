@@ -197,7 +197,7 @@ def _evaluate_equation(equation_str: str) -> float | None:
 # ==============================================================================
 # TASK 2: Implement the Reward Function
 # ==============================================================================
-def reward_fn(generated_text: str, ground_truth: Dict, scale_factor: float = 10.0) -> float:
+def reward_fn(generated_text: str, ground_truth: Dict, scale_factor: float = 15.0) -> float:
     target = ground_truth.get("target")
     available_numbers = ground_truth.get("numbers", [])
     
@@ -588,17 +588,17 @@ def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokeni
 
 def main() -> None:
     # Hyperparameters
-    model_id = "output/best_phase_2"  # Load local model from Phase 1
+    model_id = "output/best_phase_4_512"  # Load local model from Phase 3
     device = "cuda"
     seed, gpu_mem_util = 42, 0.6
     n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 80, 128, 8, 16
-    lr, clip_range, adv_eps = 2e-6, 0.15, 1e-4
-    temperature, min_tokens = 0.8, 4
-    eval_every = 10
+    lr, clip_range, adv_eps = 1e-6, 0.2, 1e-6
+    temperature, min_tokens = 1.1, 4
+    eval_every = 5
 
     # CHANGING HYPERPARAMETERS for main assignment
     loss_type = "grpo" # or "dr_grpo"
-    max_tokens = 256 # or 512, 1024
+    max_tokens = 512 # or 512, 1024
     
     # Initialization
     use_std_norm = loss_type == "grpo"
@@ -626,7 +626,7 @@ def main() -> None:
     eval_examples = build_dataset(eval_data)
     
     # Optimizer and Scheduler
-    optimizer = torch.optim.AdamW(policy.parameters(), lr=lr, weight_decay=1e-2, betas=(0.9, 0.95))
+    optimizer = torch.optim.AdamW(policy.parameters(), lr=lr, weight_decay=5e-4, betas=(0.9, 0.95))
     scheduler = get_constant_schedule_with_warmup(optimizer=optimizer, num_warmup_steps=0)
     
     # Logging
