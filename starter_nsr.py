@@ -1,5 +1,53 @@
 # starter_nsr.py
-
+#
+# NSR (Negative Sample Reinforcement) Implementation
+# Based on: "The Surprising Effectiveness of Negative Reinforcement in LLM Reasoning"
+# Paper: https://arxiv.org/pdf/2506.01347
+#
+# KEY CHANGES FROM starter.py (GRPO):
+#
+# 1. BINARY REWARD FUNCTION (line ~196)
+#    - Changed from {0, 0.1, 1.0} to {-1, +1}
+#    - +1 if correct (has <answer>, valid numbers, equals target)
+#    - -1 otherwise (matches paper's verifiable reward setup)
+#
+# 2. NEW: RLObjective ENUM (line ~334)
+#    - RLVR: Standard baseline (all samples, ±1 rewards)
+#    - PSR: Positive Sample Reinforcement (only correct samples)
+#    - NSR: Negative Sample Reinforcement (only incorrect samples)
+#    - W_REINFORCE: Weighted-REINFORCE (correct=+λ, incorrect=-1)
+#
+# 3. NEW: make_weighted_rewards() (line ~340)
+#    - Applies objective-specific reward weighting
+#    - Filters samples for PSR/NSR
+#    - Returns: weighted_rewards, keep_mask
+#
+# 4. MODIFIED: compute_group_normalized_advantages() (line ~299)
+#    - Added precomputed_rewards parameter
+#    - Can now accept pre-weighted rewards
+#    - Enables NSR/PSR/W-REINFORCE advantage computation
+#
+# 5. MODIFIED: train() function (line ~515)
+#    - Added objective and lambda_psr parameters
+#    - Sample filtering logic after rollout (lines ~560-587)
+#    - Ensures batch size is multiple of group_size
+#    - Uses effective batch size for loss averaging
+#
+# 6. NEW: NSR METRICS LOGGING (lines ~547-558)
+#    - samples/correct_ratio: Learning progress (should increase)
+#    - filtering/samples_kept: Sample efficiency (varies by objective)
+#
+# 7. MODIFIED: main() (line ~639)
+#    - Added objective selection (line ~635)
+#    - Added lambda_psr hyperparameter (line ~636)
+#    - Passes these to train() function
+#
+# USAGE:
+#   Change line ~635 to switch objectives:
+#   - objective = RLObjective.W_REINFORCE  (paper's best, λ=0.1)
+#   - objective = RLObjective.NSR          (only train on mistakes)
+#   - objective = RLObjective.PSR          (only train on correct)
+#   - objective = RLObjective.RLVR         (standard baseline)
 
 import os
 import datetime
@@ -544,6 +592,19 @@ def train(
             rollout_response, answers_dup, reward_fn, objective=objective, lambda_psr=lambda_psr
         )
 
+        # Calculate and log critical NSR metrics
+        raw_rewards_for_metrics = torch.tensor(
+            [reward_fn(r, gt) for r, gt in zip(rollout_response, answers_dup)],
+            dtype=torch.float32
+        )
+        num_correct = (raw_rewards_for_metrics > 0).sum().item()
+        correct_ratio = num_correct / len(raw_rewards_for_metrics)
+        samples_kept = keep_mask.sum().item()
+        
+        if writer:
+            writer.add_scalar("samples/correct_ratio", correct_ratio, train_step)
+            writer.add_scalar("filtering/samples_kept", samples_kept, train_step)
+
         # If PSR/NSR filtered some samples, we must filter everything consistently:
         if keep_mask.sum().item() != keep_mask.numel():
             keep_list = keep_mask.tolist()
@@ -620,12 +681,12 @@ def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokeni
 
 def main() -> None:
     objective = RLObjective.W_REINFORCE  # choices: RLVR, PSR, NSR, W_REINFORCE
-    lambda_psr = 0.1                     # per paper
+    lambda_psr = 0.1                     # paper recommended 
     # Hyperparameters
     model_id = "Qwen/Qwen3-1.7B"
     device = "cuda"
     seed, gpu_mem_util = 42, 0.4
-    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 150, 128, 8, 32
+    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 200, 128, 8, 32
     lr, clip_range, adv_eps = 1e-6, 0.2, 1e-6
     temperature, min_tokens = 1.0, 4
     eval_every = 10
