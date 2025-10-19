@@ -1,5 +1,3 @@
-# starter_nsr.py
-#
 # NSR (Negative Sample Reinforcement) Implementation
 # Based on: "The Surprising Effectiveness of Negative Reinforcement in LLM Reasoning"
 # Paper: https://arxiv.org/pdf/2506.01347
