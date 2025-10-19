@@ -1,20 +1,5 @@
-# starter.py
+# starter_nsr.py
 
-# In this assignment, you'll implement the core components of the
-# Group-Reward Policy Optimization (GRPO) algorithm. You'll be working with a
-# math-solving task called "Countdown," where the model has to generate an
-# equation to reach a target number using a given set of numbers.
-#
-# You will need to implement six key functions:
-# 1. `_extract_answer`: To parse the model's response.
-# 2. `_validate_numbers`: To ensure the generated equation uses the correct numbers.
-# 3. `_evaluate_equation`: To safely calculate the result of the generated equation.
-# 4. `reward_fn`: To score the model's generated equations using the helpers.
-# 5. `compute_group_normalized_advantages`: To calculate advantages.
-# 6. `compute_loss`: To compute per-token loss.
-# 7. `masked_mean`: To compute the mean of masked tensor, used in GRPO
-# 8. `masked_mean_drgrpo`: To compute the mean of masked tensor, used in DR-GRPO
-# ==============================================================================
 
 import os
 import datetime
@@ -34,6 +19,8 @@ from datasets import load_dataset
 from torch.utils.tensorboard import SummaryWriter
 import re
 from dotenv import load_dotenv
+from enum import Enum
+
 load_dotenv()
 
 logging.getLogger("vllm.engine.scheduler").setLevel(logging.ERROR)
@@ -116,15 +103,6 @@ def tokenize_prompt_and_output(prompt_strs: List[str], output_strs: List[str], t
             response_mask[i, response_start:response_end] = True
     return {"input_ids": input_ids, "labels": labels, "response_mask": response_mask}
 
-
-
-# Reward function and evaluation (Countdown solution)
-
-# ==============================================================================
-# TASK 1: Implement Reward Helper Functions
-# Before you can write the reward function, you need to create three helper 
-# functions to parse and evaluate the model's generated text.
-# ==============================================================================
 
 def _extract_answer(solution_str: str) -> str | None:
     """
@@ -213,56 +191,30 @@ def _evaluate_equation(equation_str: str) -> float | None:
         return None
     ### END YOUR CODE ###
 
-# ==============================================================================
-# TASK 2: Implement the Reward Function
-# ==============================================================================
-def reward_fn(generated_text: str, ground_truth: Dict, scale_factor: float = 5.0) -> float:
+
+
+def reward_fn(generated_text: str, ground_truth: Dict, scale_factor: float = 1.0) -> float:
     """
-    Reward function for countdown math problems.
-
-    Your goal is to score the `generated_text` using the helper functions you just wrote.
-    The function should return a dictionary with a "reward" key.
-
-    Scoring criteria:
-    - 1.0 (Perfect): The equation is valid, uses the correct numbers, and evaluates to the target.
-    - 0.1 (Partial): The text contains an <answer> tag, but the equation is incorrect for any reason.
-    - 0.0 (Failed): The `generated_text` does not contain an <answer> tag.
-
-    Args:
-        generated_text: The full text output from the language model.
-        ground_truth: A dictionary containing `target` and `numbers`.
-
-    Returns:
-        A float value representing the reward, such as 1.0, 0.1, or 0.0
+    Binary verifiable reward for Countdown:
+    +1.0 if equation valid + uses exactly the given numbers + equals target,
+    -1.0 otherwise. (Paper uses ±1; we'll keep that and do weighting later.)
     """
+    target = ground_truth.get("target")
+    numbers = ground_truth.get("numbers", []) or ground_truth.get("nums", [])
 
-    # ### YOUR CODE HERE ###
-    # target = ground_truth.get("target")
-    # available_numbers = ground_truth.get("numbers", [])
+    eq = _extract_answer(generated_text)
+    if eq is None:
+        return -1.0
 
-    # # Extract Equation from <answer>
-    # equation = _extract_answer(generated_text)
-    # if equation is None:
-    #     # No <answer> tag found
-    #     return 0.0
+    if not _validate_numbers(eq, numbers):
+        return -1.0
 
-    # # Validate Numbers
-    # if not _validate_numbers(equation, available_numbers):
-    #     # Has <answer> tag, but wrong numbers
-    #     return 0.1
+    val = _evaluate_equation(eq)
+    if val is None:
+        return -1.0
 
-    # # Safely Evaluate
-    # result = _evaluate_equation(equation)
-    # if result is None:
-    #     # Equation invalid for any reason
-    #     return 0.1
+    return 1.0 if abs(val - target) < 1e-6 else -1.0
 
-    # # Check for Correctness
-    # if abs(result - target) < 1e-6:
-    #     return 1.0
-    # else:
-    #     return 0.1
-    # ### END YOUR CODE ###
 
 
 def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List[str], eval_answers: List[Dict]) -> Dict[str, Any]:
@@ -344,12 +296,6 @@ def log_eval(metrics: Dict[str, Any], writer: SummaryWriter | None, step: int) -
           f"partial:{metrics['count_partial']} failed:{metrics['count_failed']}")
 
 
-# -------------------------
-# Advantages and GRPO-clip loss
-# -------------------------
-# ==============================================================================
-# TASK 3: Implement Group Normalized Advantages
-# ==============================================================================
 def compute_group_normalized_advantages(
     rollout_responses: List[str],
     repeated_ground_truths: List[Dict],
@@ -357,63 +303,75 @@ def compute_group_normalized_advantages(
     group_size: int,
     advantage_eps: float,
     normalize_by_std: bool,
+    precomputed_rewards: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
-    """ Computes advantages by normalizing rewards within groups.
-    
-    Args:
-        rollout_responses: List of generated responses (length = batch_size * group_size)
-        repeated_ground_truths: Ground truth repeated for each response
-        reward_fn: Function to compute rewards
-        group_size: Number of responses per question (G)
-        advantage_eps: Small constant for numerical stability (epsilon)
-        normalize_by_std: If True, normalize by std (GRPO); if False, don't (DR-GRPO)
-    
-    Returns:
-        advantages: Flattened tensor of advantages (shape: [batch_size * group_size])
-        raw_rewards: Original rewards before normalization
-        metadata: Dictionary with 'mean', 'std', 'max', 'min' of raw rewards
-            (e.g. metadata = {
-                "mean": torch.mean(raw_rewards),
-                "std": torch.std(raw_rewards),
-                "max": torch.max(raw_rewards),
-                "min": torch.min(raw_rewards),
-            })
-    """
+    # 1) compute or use provided rewards
+    if precomputed_rewards is None:
+        rewards = [reward_fn(resp, gt) for resp, gt in zip(rollout_responses, repeated_ground_truths)]
+        raw_rewards = torch.tensor(rewards, dtype=torch.float32)
+    else:
+        raw_rewards = precomputed_rewards.float()
 
-    advantages, raw_rewards, metadata = None, None, {}
-    ### YOUR CODE HERE ###
-    # 1. Calculate raw rewards
-    rewards = [reward_fn(resp, gt) for resp, gt in zip(rollout_responses, repeated_ground_truths)]
-    raw_rewards = torch.tensor(rewards, dtype=torch.float32)
-
-    # 2. Reshape into groups
-    batch_size = len(raw_rewards) // group_size
-    rewards_grouped = raw_rewards.view(-1, group_size) # (-1, group_size)
-
-    # 3. Compute group mean and std
+    # 2) reshape into groups (assumes length multiple of group_size)
+    rewards_grouped = raw_rewards.view(-1, group_size)
     group_mean = rewards_grouped.mean(dim=1, keepdim=True)
     group_std = rewards_grouped.std(dim=1, keepdim=True, unbiased=False)
 
-    # 4. Compute advantage (subtract group mean)
     advantages = rewards_grouped - group_mean
-
-    # 5. Optionally normalize by std
     if normalize_by_std:
         advantages = advantages / (group_std + advantage_eps)
 
-    # 6. Flatten back to 1D
     advantages = advantages.flatten()
-
-    # 7. Metadata dictionary
     metadata = {
         "mean": torch.mean(raw_rewards),
         "std": torch.std(raw_rewards, unbiased=False),
         "max": torch.max(raw_rewards),
         "min": torch.min(raw_rewards),
     }
-    
-    ### END YOUR CODE ###
     return advantages, raw_rewards, metadata
+
+
+class RLObjective(str, Enum):
+    RLVR = "rlvr"            # use all samples, rewards = {+1, -1}
+    PSR = "psr"              # keep only correct samples
+    NSR = "nsr"              # keep only incorrect samples
+    W_REINFORCE = "w_reinforce"  # rewards = {+λ, -1}
+
+def make_weighted_rewards(rollout_responses, repeated_ground_truths, base_reward_fn, objective: RLObjective, lambda_psr: float = 0.1):
+    """
+    Returns:
+      rewards: torch.FloatTensor [N]
+      keep_mask: torch.BoolTensor [N] -> which samples to keep in this objective
+    """
+    raw = [base_reward_fn(r, gt) for r, gt in zip(rollout_responses, repeated_ground_truths)]
+    rewards = []
+    keep = []
+    for rv in raw:
+        if objective == RLObjective.RLVR:
+            rewards.append(rv)  # +1 or -1
+            keep.append(True)
+        elif objective == RLObjective.PSR:
+            keep.append(rv > 0)
+            if rv > 0:
+                rewards.append(1.0)
+        elif objective == RLObjective.NSR:
+            keep.append(rv < 0)
+            if rv < 0:
+                rewards.append(-1.0)
+        elif objective == RLObjective.W_REINFORCE:
+            # +λ for correct, -1 for incorrect
+            if rv > 0:
+                rewards.append(lambda_psr)
+                keep.append(True)
+            else:
+                rewards.append(-1.0)
+                keep.append(True)
+        else:
+            raise ValueError(objective)
+    rewards = torch.tensor(rewards, dtype=torch.float32)
+    keep_mask = torch.tensor(keep, dtype=torch.bool)
+    return rewards, keep_mask
+
 
 
 # ==============================================================================
@@ -561,6 +519,7 @@ def train(
     group_size: int, gradient_accumulation_steps: int, clip_range: float, use_std_normalization: bool,
     advantage_eps: float, device: str, eval_every: int = 5, writer: SummaryWriter = None, seed: int,
     loss_type: str = "grpo", max_completion_length: int = 256,
+    objective: RLObjective = RLObjective.RLVR, lambda_psr: float = 0.1,
 ) -> None:
     n_prompts_per_rollout_batch = rollout_batch_size // group_size
     micro_train_batch_size = rollout_batch_size // gradient_accumulation_steps
@@ -579,24 +538,68 @@ def train(
         rollout_input, rollout_response, rollout_tokens = rollout_with_vllm(policy, llm, sampling_params, prompts_batch, group_size)
         answers_dup = duplicate_data(answers_batch, group_size)
         avg_output_tokens = sum(rollout_tokens) / len(rollout_tokens) if rollout_tokens else 0.0
-        advantages, _, reward_meta = compute_group_normalized_advantages(
-            rollout_response, answers_dup, reward_fn, group_size, advantage_eps, use_std_normalization
+                
+        # NSR/PSR filtering: Build weighted rewards + keep mask for objective
+        weighted_rewards, keep_mask = make_weighted_rewards(
+            rollout_response, answers_dup, reward_fn, objective=objective, lambda_psr=lambda_psr
         )
+
+        # If PSR/NSR filtered some samples, we must filter everything consistently:
+        if keep_mask.sum().item() != keep_mask.numel():
+            keep_list = keep_mask.tolist()
+            rollout_input   = [t for t, k in zip(rollout_input,   keep_list) if k]
+            rollout_response= [t for t, k in zip(rollout_response,keep_list) if k]
+            answers_dup     = [t for t, k in zip(answers_dup,     keep_list) if k]
+            weighted_rewards = weighted_rewards[keep_mask]
+            rollout_batch_size_effective = len(rollout_response)
+        else:
+            rollout_batch_size_effective = rollout_batch_size
+
+        # Ensure length is a multiple of group_size (needed for .view(-1, group_size))
+        rem = rollout_batch_size_effective % group_size
+        if rem != 0:
+            cut = rollout_batch_size_effective - rem
+            rollout_input        = rollout_input[:cut]
+            rollout_response     = rollout_response[:cut]
+            answers_dup          = answers_dup[:cut]
+            weighted_rewards     = weighted_rewards[:cut]
+            rollout_batch_size_effective = cut
+            if rollout_batch_size_effective == 0:
+                # skip this iteration if nothing remains
+                continue
+
+        # Compute advantages using precomputed (possibly weighted) rewards
+        advantages, _, reward_meta = compute_group_normalized_advantages(
+            rollout_response, answers_dup, reward_fn, group_size, advantage_eps, use_std_normalization,
+            precomputed_rewards=weighted_rewards
+        )
+
+        # Tokenize the (possibly filtered) rollouts
         tokenized = tokenize_rollouts(rollout_input, rollout_response, tokenizer)
+
+        # Microbatch loop should iterate over rollout_batch_size_effective instead of rollout_batch_size
         optimizer.zero_grad()
         rollout_loss = 0.0
-        for micro_idx in range(0, rollout_batch_size, micro_train_batch_size):
+        for micro_idx in range(0, rollout_batch_size_effective, micro_train_batch_size):
             s = slice(micro_idx, micro_idx + micro_train_batch_size)
             loss, _ = grpo_microbatch_step(
-                policy, tokenized["input_ids"][s].to(device), tokenized["labels"][s].to(device),
-                tokenized["response_mask"][s].to(device), advantages[s].to(device),
-                gradient_accumulation_steps, clip_range, loss_type=loss_type, max_completion_length=max_completion_length
+                policy,
+                tokenized["input_ids"][s].to(device),
+                tokenized["labels"][s].to(device),
+                tokenized["response_mask"][s].to(device),
+                advantages[s].to(device),
+                gradient_accumulation_steps, clip_range, loss_type=loss_type,
+                max_completion_length=max_completion_length
             )
             rollout_loss += float(loss.item())
+
+
+
+            
         grad_norm = torch.nn.utils.clip_grad_norm_([p for p in policy.parameters() if p.grad is not None], 1.0)
         optimizer.step()
         scheduler.step()
-        rollout_loss /= (rollout_batch_size / micro_train_batch_size)
+        rollout_loss /= (rollout_batch_size_effective / micro_train_batch_size)
         train_step += 1
         print(f"Step {train_step} | Loss: {rollout_loss:.4f} | Grad: {grad_norm:.4f} | "
               f"Reward mean: {reward_meta['mean']:.4f} | Reward std: {reward_meta['std']:.4f}")
@@ -616,12 +619,14 @@ def init_policy(model_id: str, device: str) -> Tuple[PreTrainedModel, AutoTokeni
 
 
 def main() -> None:
+    objective = RLObjective.W_REINFORCE  # choices: RLVR, PSR, NSR, W_REINFORCE
+    lambda_psr = 0.1                     # per paper
     # Hyperparameters
     model_id = "Qwen/Qwen3-1.7B"
     device = "cuda"
     seed, gpu_mem_util = 42, 0.4
     n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 150, 128, 8, 32
-    lr, clip_range, adv_eps = 7e-6, 0.2, 1e-6
+    lr, clip_range, adv_eps = 1e-6, 0.2, 1e-6
     temperature, min_tokens = 1.0, 4
     eval_every = 10
 
@@ -674,7 +679,8 @@ def main() -> None:
         gradient_accumulation_steps=grad_acc_steps, clip_range=clip_range,
         use_std_normalization=use_std_norm, advantage_eps=adv_eps, device=device,
         eval_every=eval_every, writer=writer, seed=seed, loss_type=loss_type,
-        max_completion_length=max_tokens
+        max_completion_length=max_tokens,
+        objective=objective, lambda_psr=lambda_psr
     )
     
     # Save model
@@ -684,69 +690,6 @@ def main() -> None:
     tokenizer.save_pretrained(out_dir)
     print(f"Saved model and tokenizer to {out_dir}")
     writer.close()
-    
-# Test Function
-def test_functions():
-    """Quick unit tests for the implemented functions"""
-    print("\n=== Running Quick Tests ===")
-    
-    # Test masked_mean
-    print("Testing masked_mean...")
-    tensor = torch.randn(4, 10)  # [batch_size=4, seq_len=10]
-    mask = torch.tensor([
-        [False, False, True, True, True, True, False, False, False, False],
-        [False, True, True, True, True, False, False, False, False, False],
-        [False, False, False, True, True, True, True, True, False, False],
-        [False, False, True, True, True, True, True, False, False, False],
-    ])
-    result = masked_mean(tensor, mask)
-    assert result.shape == torch.Size([]), f"Expected scalar, got shape {result.shape}"
-    print(f"✅ masked_mean works! Result: {result.item():.4f}")
-    
-    # Test masked_mean_drgrpo
-    print("Testing masked_mean_drgrpo...")
-    result = masked_mean_drgrpo(tensor, mask, num_tokens=256)
-    assert result.shape == torch.Size([]), f"Expected scalar, got shape {result.shape}"
-    print(f"✅ masked_mean_drgrpo works! Result: {result.item():.4f}")
-    
-    # Test compute_loss
-    print("Testing compute_loss...")
-    advantages = torch.randn(4)  # [batch_size=4]
-    advantages = advantages.unsqueeze(-1)  # ✅ ADD THIS LINE - simulate grpo_microbatch_step
-    policy_log_probs = torch.randn(4, 10)  # [batch_size=4, seq_len=10]
-    old_log_probs = torch.randn(4, 10)
-    clip_range = 0.2
-    
-    loss_per_token, stats = compute_loss(advantages, policy_log_probs, old_log_probs, clip_range)
-    assert loss_per_token.shape == (4, 10), f"Expected shape (4, 10), got {loss_per_token.shape}"
-    assert "ratio_mean" in stats, "Missing ratio_mean in stats"
-    print(f"✅ compute_loss works! Loss shape: {loss_per_token.shape}")
-    
-    # Test compute_group_normalized_advantages
-    print("Testing compute_group_normalized_advantages...")
-    rollout_responses = ["resp1", "resp2", "resp3", "resp4"]
-    ground_truths = [
-        {"target": 36, "numbers": [79, 17, 60]},
-        {"target": 36, "numbers": [79, 17, 60]},
-        {"target": 36, "numbers": [79, 17, 60]},
-        {"target": 36, "numbers": [79, 17, 60]},
-    ]
-    
-    advantages, raw_rewards, metadata = compute_group_normalized_advantages(
-        rollout_responses, ground_truths, reward_fn, group_size=2, 
-        advantage_eps=1e-6, normalize_by_std=True
-    )
-    assert advantages.shape == (4,), f"Expected shape (4,), got {advantages.shape}"
-    assert raw_rewards.shape == (4,), f"Expected shape (4,), got {raw_rewards.shape}"
-    assert "mean" in metadata and "std" in metadata, "Missing metadata keys"
-    print(f"✅ compute_group_normalized_advantages works!")
-    
-    print("\n=== All Tests Passed! ===\n")
-
 
 if __name__ == "__main__":
-    # Run quick tests first
-    test_functions()
-    
-    # Then run main training
     main()
