@@ -161,18 +161,10 @@ def _extract_answer(solution_str: str) -> str | None:
     Returns:
         The stripped string content of the last answer tag, or None if no tag is found.
     """
-    ### YOUR CODE HERE ###
     if not solution_str:
         return None
     matches = list(re.finditer(r"<answer>\s*(.*?)\s*</answer>", solution_str, flags=re.DOTALL | re.IGNORECASE))
     return matches[-1].group(1).strip() if matches else None
-    ### END YOUR CODE ###
-    
-# Input/Output Format:
-rollout_response = "Okay, let's see. I need to use 79, 17, ... So the equation is ,→ <answer>(79 - (60 - 17))</answer>"
-extracted_answer = _extract_answer(rollout_response)
-assert extracted_answer == "(79 - (60 - 17))"
-print("✅ extract_answer: Test passed!")
 
 
 def _validate_numbers(equation_str: str, available_numbers: List[int]) -> bool:
@@ -203,14 +195,6 @@ def _validate_numbers(equation_str: str, available_numbers: List[int]) -> bool:
         
     except Exception:
         return False 
-    ### END YOUR CODE ###
-assert _validate_numbers("(79 - (60 - 17))", [79, 60, 17]) == True
-assert _validate_numbers("(79 - 60)", [79, 60, 17]) == False
-assert _validate_numbers("(79 - 17 - 17)", [79, 60, 17]) == False
-assert _validate_numbers("79 + 60 + 17", [79, 17, 60]) == True
-assert _validate_numbers("", [1, 2, 3]) == False
-
-print("✅ validate_numbers: Tests passed!")
 
 
 def _evaluate_equation(equation_str: str) -> float | None:
@@ -281,15 +265,14 @@ def evaluate_model(llm: LLM, sampling_params: SamplingParams, eval_prompts: List
     rewards_tensor = torch.tensor(rewards) if rewards else torch.tensor([0.0])
     tol = 1e-8
     count_correct = sum(1 for r in rewards if abs(r - 1.0) < tol)
-    count_partial = sum(1 for r in rewards if abs(r - 0.1) < tol)
-    count_failed = sum(1 for r in rewards if abs(r - 0.0) < tol)
+    count_incorrect = sum(1 for r in rewards if abs(r - (-1.0)) < tol)
     accuracy = (count_correct / len(rewards)) * 100 if rewards else 0.0
     avg_output_tokens = sum(output_token_lengths) / len(output_token_lengths) if output_token_lengths else 0.0
     return {
         "mean_reward": float(rewards_tensor.mean().item()),
         "std_reward": float(rewards_tensor.std().item()) if rewards_tensor.numel() > 1 else 0.0,
         "num_examples": len(rewards), "examples": examples, "count_correct": count_correct,
-        "count_partial": count_partial, "count_failed": count_failed, "accuracy": accuracy,
+        "count_incorrect": count_incorrect, "accuracy": accuracy,
         "avg_output_tokens": avg_output_tokens,
     }
 
@@ -319,27 +302,21 @@ def log_eval(metrics: Dict[str, Any], writer: SummaryWriter | None, step: int) -
     if not examples: return
     tol = 1e-8
     correct_examples = [ex for ex in examples if abs(float(ex.get("reward", 0.0)) - 1.0) < tol][:10]
-    partial_examples = [ex for ex in examples if abs(float(ex.get("reward", 0.0)) - 0.1) < tol][:10]
-    failed_examples = [ex for ex in examples if abs(float(ex.get("reward", 0.0)) - 0.0) < tol][:10]
+    incorrect_examples = [ex for ex in examples if abs(float(ex.get("reward", 0.0)) - (-1.0)) < tol][:10]
     if correct_examples:
-        print(f"\n=== Eval examples (CORRECT, reward=1.0) @ step {step} ===")
+        print(f"\n=== Eval examples (CORRECT, reward=+1) @ step {step} ===")
         for idx, ex in enumerate(correct_examples[:2], 1): print(f"[CORRECT #{idx}]\n" + _format_eval_example(ex))
-    if partial_examples:
-        print(f"\n=== Eval examples (PARTIAL, reward=0.1) @ step {step} ===")
-        for idx, ex in enumerate(partial_examples[:2], 1): print(f"[PARTIAL #{idx}]\n" + _format_eval_example(ex))
-    if failed_examples:
-        print(f"\n=== Eval examples (FAILED, reward=0.0) @ step {step} ===")
-        for idx, ex in enumerate(failed_examples[:2], 1): print(f"[FAILED #{idx}]\n" + _format_eval_example(ex))
+    if incorrect_examples:
+        print(f"\n=== Eval examples (INCORRECT, reward=-1) @ step {step} ===")
+        for idx, ex in enumerate(incorrect_examples[:2], 1): print(f"[INCORRECT #{idx}]\n" + _format_eval_example(ex))
     if writer:
         correct_text = "\n\n".join([_format_eval_example(ex) for ex in correct_examples]) or ""
-        partial_text = "\n\n".join([_format_eval_example(ex) for ex in partial_examples]) or ""
-        failed_text = "\n\n".join([_format_eval_example(ex) for ex in failed_examples]) or ""
+        incorrect_text = "\n\n".join([_format_eval_example(ex) for ex in incorrect_examples]) or ""
         if correct_text: writer.add_text("eval/examples_correct", correct_text, global_step=step)
-        if partial_text: writer.add_text("eval/examples_partial", partial_text, global_step=step)
-        if failed_text: writer.add_text("eval/examples_failed", failed_text, global_step=step)
+        if incorrect_text: writer.add_text("eval/examples_incorrect", incorrect_text, global_step=step)
     print(f"Eval @ step {step}: accuracy={metrics['accuracy']:.1f}% mean_reward={metrics['mean_reward']:.4f} "
           f"avg_tokens={metrics['avg_output_tokens']:.1f} | correct:{metrics['count_correct']} "
-          f"partial:{metrics['count_partial']} failed:{metrics['count_failed']}")
+          f"incorrect:{metrics['count_incorrect']}")
 
 
 def compute_group_normalized_advantages(
@@ -574,7 +551,7 @@ def train(
 
     metrics = evaluate_model(llm, sampling_params, eval_prompts, eval_answers)
     if writer:
-        for k in ["accuracy", "mean_reward", "std_reward", "avg_output_tokens", "count_correct", "count_partial", "count_failed"]:
+        for k in ["accuracy", "mean_reward", "std_reward", "avg_output_tokens", "count_correct", "count_incorrect"]:
             writer.add_scalar(f"eval/{k}", metrics[k], global_step=train_step)
         log_eval(metrics, writer, train_step)
 
@@ -661,7 +638,8 @@ def train(
         rollout_loss /= (rollout_batch_size_effective / micro_train_batch_size)
         train_step += 1
         print(f"Step {train_step} | Loss: {rollout_loss:.4f} | Grad: {grad_norm:.4f} | "
-              f"Reward mean: {reward_meta['mean']:.4f} | Reward std: {reward_meta['std']:.4f}")
+              f"Reward mean: {reward_meta['mean']:.4f} | Reward std: {reward_meta['std']:.4f} | "
+              f"Correct: {correct_ratio:.2%} | Samples kept: {samples_kept}/{rollout_batch_size}")
         log_train(rollout_loss, grad_norm, reward_meta, avg_output_tokens, writer, train_step)
         if train_step % eval_every == 0:
             metrics = evaluate_model(llm, sampling_params, eval_prompts, eval_answers)
@@ -691,7 +669,7 @@ def main() -> None:
 
     # CHANGING HYPERPARAMETERS for main assignment
     loss_type = "grpo" # or "dr_grpo"
-    max_tokens = 256 # or 512, 1024
+    max_tokens = 512 # or 512, 1024
     
     # Initialization
     use_std_norm = loss_type == "grpo"
