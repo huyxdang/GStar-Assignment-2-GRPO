@@ -662,7 +662,7 @@ def main() -> None:
     model_id = "Qwen/Qwen3-1.7B"
     device = "cuda"
     seed, gpu_mem_util = 42, 0.4
-    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 400, 128, 8, 16
+    n_grpo_steps, rollout_batch_size, group_size, grad_acc_steps = 200, 128, 8, 16
     lr, clip_range, adv_eps = 3e-6, 0.2, 1e-4
     temperature, min_tokens = 0.7, 4
     eval_every = 10
