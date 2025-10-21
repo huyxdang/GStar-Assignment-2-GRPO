@@ -635,7 +635,7 @@ def train(
         grad_norm = torch.nn.utils.clip_grad_norm_([p for p in policy.parameters() if p.grad is not None], 1.0)
         optimizer.step()
         scheduler.step()
-        rollout_loss /= (rollout_batch_size_effective / micro_train_batch_size)
+        # Note: rollout_loss is already scaled by gradient_accumulation_steps in grpo_microbatch_step
         train_step += 1
         print(f"Step {train_step} | Loss: {rollout_loss:.4f} | Grad: {grad_norm:.4f} | "
               f"Reward mean: {reward_meta['mean']:.4f} | Reward std: {reward_meta['std']:.4f} | "
